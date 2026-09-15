@@ -1,0 +1,3 @@
+Hello from LanDrop.
+
+This is a privacy-safe file for the first download test.

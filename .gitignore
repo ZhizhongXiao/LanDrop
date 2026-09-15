@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Virtual environments
+.venv/
+venv/
+
+# Editors and operating system
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Build output
+build/
+dist/
+*.spec
+
+# Runtime and incomplete transfers
+*.part
+*.log
+
+# Local test payloads; keep the directory instructions tracked
+shared/*
+!shared/README.md
+!shared/hello.txt
+!shared/中文示例.txt
