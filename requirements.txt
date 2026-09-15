@@ -1,1 +1,2 @@
 bottle==0.13.4
+pywebview==6.2.1

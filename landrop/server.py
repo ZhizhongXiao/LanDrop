@@ -45,6 +45,9 @@ class ServerGroup:
     def __init__(self, lan_address: str, port: int, application: Any) -> None:
         self._servers: list[WSGIServer] = []
         self._threads: list[threading.Thread] = []
+        self._lifecycle_lock = threading.Lock()
+        self._stopping = threading.Event()
+        self._closed = False
         try:
             self._servers.append(
                 make_server(
@@ -70,25 +73,33 @@ class ServerGroup:
             raise
 
     def serve_forever(self) -> None:
-        for server in self._servers:
-            address, port = server.server_address[:2]
-            thread = threading.Thread(
-                target=server.serve_forever,
-                name=f"LanDrop-{address}:{port}",
-                daemon=True,
-            )
-            thread.start()
-            self._threads.append(thread)
-        stop_check = threading.Event()
-        while all(thread.is_alive() for thread in self._threads):
-            stop_check.wait(0.5)
+        with self._lifecycle_lock:
+            if self._closed:
+                return
+            for server in self._servers:
+                address, port = server.server_address[:2]
+                thread = threading.Thread(
+                    target=server.serve_forever,
+                    name=f"LanDrop-{address}:{port}",
+                    daemon=True,
+                )
+                thread.start()
+                self._threads.append(thread)
+        while not self._stopping.wait(0.5):
+            if not all(thread.is_alive() for thread in self._threads):
+                return
 
     def close(self) -> None:
-        for server in self._servers:
-            if self._threads:
-                server.shutdown()
-            server.server_close()
-        for thread in self._threads:
-            thread.join(timeout=3)
-        self._threads.clear()
-        self._servers.clear()
+        with self._lifecycle_lock:
+            if self._closed:
+                return
+            self._closed = True
+            self._stopping.set()
+            for server in self._servers:
+                if self._threads:
+                    server.shutdown()
+                server.server_close()
+            for thread in self._threads:
+                thread.join(timeout=3)
+            self._threads.clear()
+            self._servers.clear()
