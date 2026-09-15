@@ -3,6 +3,7 @@ __pycache__/
 *.py[cod]
 *.pyo
 .pytest_cache/
+.test-tmp/
 .coverage
 htmlcov/
 
@@ -30,3 +31,10 @@ shared/*
 !shared/README.md
 !shared/hello.txt
 !shared/中文示例.txt
+
+# Received user files; keep only the directory instructions tracked
+received/*
+!received/README.md
+
+# Optional source-mode local state
+.landrop-data/
