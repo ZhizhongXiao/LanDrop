@@ -4,13 +4,22 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import html
+import json
 from pathlib import Path
+import re
 import secrets
 import threading
+from typing import Any, Iterable, Iterator
 from urllib.parse import quote
 
 from bottle import Bottle, HTTPResponse, redirect, request, response, static_file
 
+from .lifecycle import (
+    SessionExpiredError,
+    SessionLifecycle,
+    TransferCancelledError,
+    TransferHandle,
+)
 from .storage import (
     InsufficientSpaceError,
     InvalidFilenameError,
@@ -37,14 +46,27 @@ class WebConfig:
     receive_directory: Path
     max_upload_bytes: int
     credentials: CredentialStore
+    lifecycle: SessionLifecycle | None = None
 
 
-def create_application(config: WebConfig) -> tuple[Bottle, str]:
+def create_application(config: WebConfig) -> tuple[Any, str]:
     app = Bottle()
-    pairing_code = f"{secrets.randbelow(100_000_000):08d}"
+    lifecycle = config.lifecycle or SessionLifecycle()
     csrf_token = secrets.token_urlsafe(24)
     failed_pairing: dict[str, int] = {}
     pairing_lock = threading.Lock()
+
+    def expired_response() -> HTTPResponse | None:
+        if lifecycle.accepts_new_requests():
+            return None
+        return _html_response(
+            _page(
+                "会话已到期",
+                "<main class=\"narrow\"><h1>本次传输会话已到期</h1>"
+                "<p>请在电脑上重新启动 LanDrop 服务。</p></main>",
+            ),
+            503,
+        )
 
     def current_client() -> TrustedClient | None:
         return config.credentials.verify(request.get_cookie(COOKIE_NAME))
@@ -61,23 +83,32 @@ def create_application(config: WebConfig) -> tuple[Bottle, str]:
     @app.hook("after_request")
     def security_headers() -> None:
         response.set_header("X-Content-Type-Options", "nosniff")
-        response.set_header("X-Frame-Options", "DENY")
+        response.set_header("X-Frame-Options", "SAMEORIGIN")
         response.set_header("Referrer-Policy", "no-referrer")
         response.set_header("Cache-Control", "no-store")
         response.set_header(
+            "Accept-CH",
+            "Sec-CH-UA, Sec-CH-UA-Mobile, Sec-CH-UA-Platform, Sec-CH-UA-Model",
+        )
+        response.set_header(
             "Content-Security-Policy",
-            "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'",
+            "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; "
+            "connect-src 'self'; frame-src 'self'; frame-ancestors 'self'; "
+            "form-action 'self'; base-uri 'none'",
         )
 
     @app.get("/")
     def index() -> str:
+        expired = expired_response()
+        if expired is not None:
+            return expired
         client = current_client()
         if client is None:
             return _pairing_page()
 
         rows = []
         for item in list_shared_files(config.shared_directory):
-            url = "/download/" + quote(item.relative_path, safe="/")
+            url = "/prepare-download/" + quote(item.relative_path, safe="/")
             rows.append(
                 "<li><a href=\"{}\">{}</a><span>{}</span></li>".format(
                     html.escape(url, quote=True),
@@ -112,8 +143,144 @@ def create_application(config: WebConfig) -> tuple[Bottle, str]:
         """
         return _page("LanDrop", body)
 
+    @app.get("/session-status")
+    def session_status() -> HTTPResponse:
+        client = current_client()
+        if client is None:
+            return HTTPResponse(
+                body=json.dumps({"error": "authentication"}),
+                status=401,
+                content_type="application/json; charset=UTF-8",
+            )
+        snapshot = lifecycle.snapshot()
+        status = 200 if snapshot.phase in {"running", "grace"} else 503
+        return HTTPResponse(
+            body=json.dumps(
+                {
+                    "phase": snapshot.phase,
+                    "remaining_seconds": snapshot.remaining_seconds,
+                    "grace_remaining_seconds": snapshot.grace_remaining_seconds,
+                    "stop_reason": snapshot.stop_reason,
+                },
+                ensure_ascii=False,
+            ),
+            status=status,
+            content_type="application/json; charset=UTF-8",
+        )
+
+    @app.get("/prepare-download/<filepath:path>")
+    def prepare_download(filepath: str) -> HTTPResponse | str:
+        expired = expired_response()
+        if expired is not None:
+            return expired
+        client = require_client()
+        if isinstance(client, HTTPResponse):
+            return client
+        try:
+            candidate = resolve_shared_file(config.shared_directory, filepath)
+        except InvalidFilenameError as exc:
+            return _html_response(_error_page(403, str(exc)), 403)
+        except FileNotFoundError:
+            return _html_response(_error_page(404, "请求文件不存在。"), 404)
+        relative = candidate.relative_to(config.shared_directory.resolve(strict=True)).as_posix()
+        ticket_url = "/start-download/" + quote(relative, safe="/")
+        body = f"""
+        <main class="narrow">
+          <h1>文件下载</h1>
+          <p><strong>{html.escape(candidate.name)}</strong> · {html.escape(format_size(candidate.stat().st_size))}</p>
+          <p id="downloadStatus">正在交给浏览器下载……</p>
+          <p><button id="downloadLink" type="button">开始或再次下载</button></p>
+          <p><a href="/">返回文件列表</a></p>
+          <iframe name="downloadTarget" title="下载目标" hidden></iframe>
+        </main>
+        <script>
+          const statusNode = document.getElementById('downloadStatus');
+          const link = document.getElementById('downloadLink');
+          const ticketUrl = '{html.escape(ticket_url, quote=True)}';
+          async function beginDownload() {{
+            link.disabled = true;
+            try {{
+              const response = await fetch(ticketUrl, {{ cache: 'no-store' }});
+              if (!response.ok) throw new Error('ticket-failed');
+              const ticket = await response.json();
+              const anchor = document.createElement('a');
+              anchor.href = ticket.download_url;
+              anchor.target = 'downloadTarget';
+              anchor.download = '';
+              anchor.hidden = true;
+              document.body.appendChild(anchor);
+              anchor.click();
+              anchor.remove();
+              statusNode.textContent = '已交给浏览器下载；再次点击会创建一个新的文件任务。';
+            }} catch (_error) {{
+              statusNode.textContent = '无法开始下载，服务可能已停止。';
+            }} finally {{
+              link.disabled = false;
+            }}
+          }}
+          link.addEventListener('click', beginDownload);
+          setTimeout(beginDownload, 100);
+          let polling = true;
+          async function pollStatus() {{
+            const controller = new AbortController();
+            const timeout = setTimeout(() => controller.abort(), 1500);
+            try {{
+              const response = await fetch('/session-status', {{
+                cache: 'no-store', signal: controller.signal
+              }});
+              if (!response.ok) throw new Error('service-stopped');
+              const state = await response.json();
+              if (state.phase === 'grace') {{
+                statusNode.textContent = `会话已到期，当前下载处于宽限期，剩余 ${{state.grace_remaining_seconds}} 秒。`;
+              }} else {{
+                statusNode.textContent = `下载进行中；会话剩余 ${{state.remaining_seconds}} 秒。`;
+              }}
+            }} catch (_error) {{
+              polling = false;
+              statusNode.textContent = '服务已停止或网络中断。下载可能显示为“已暂停”；重新启动 LanDrop 后可在浏览器下载管理器中尝试继续。';
+            }} finally {{
+              clearTimeout(timeout);
+              if (polling) setTimeout(pollStatus, 750);
+            }}
+          }}
+          pollStatus();
+        </script>
+        """
+        return _page("下载状态", body)
+
+    @app.get("/start-download/<filepath:path>")
+    def start_download(filepath: str) -> HTTPResponse:
+        expired = expired_response()
+        if expired is not None:
+            return expired
+        client = require_client()
+        if isinstance(client, HTTPResponse):
+            return client
+        try:
+            candidate = resolve_shared_file(config.shared_directory, filepath)
+        except InvalidFilenameError as exc:
+            return _html_response(_error_page(403, str(exc)), 403)
+        except FileNotFoundError:
+            return _html_response(_error_page(404, "请求文件不存在。"), 404)
+        relative = candidate.relative_to(config.shared_directory.resolve(strict=True)).as_posix()
+        download_id = secrets.token_urlsafe(12)
+        target = (
+            "/download/"
+            + quote(relative, safe="/")
+            + "?download_id="
+            + quote(download_id, safe="")
+        )
+        return HTTPResponse(
+            body=json.dumps({"download_url": target}, ensure_ascii=False),
+            status=200,
+            content_type="application/json; charset=UTF-8",
+        )
+
     @app.post("/pair")
     def pair() -> HTTPResponse:
+        expired = expired_response()
+        if expired is not None:
+            return expired
         remote = request.remote_addr or "unknown"
         with pairing_lock:
             attempts = failed_pairing.get(remote, 0)
@@ -126,17 +293,32 @@ def create_application(config: WebConfig) -> tuple[Bottle, str]:
         if request.content_length < 0 or request.content_length > SMALL_FORM_LIMIT:
             return _html_response(_error_page(413, "配对请求大小无效。"), 413)
 
-        submitted = (request.forms.getunicode("code") or "").strip()
-        if not secrets.compare_digest(submitted, pairing_code):
+        submitted = _pairing_digits(request.forms.getunicode("code") or "")
+        if not lifecycle.consume_pairing_code(submitted):
             with pairing_lock:
                 failed_pairing[remote] = attempts + 1
             return _html_response(
-                _page("配对失败", "<h1>配对失败</h1><p>配对码不正确。</p><p><a href=\"/\">返回</a></p>"),
+                _page(
+                    "配对失败",
+                    "<h1>配对失败</h1><p>配对码不正确或已被其他设备使用。"
+                    "请查看电脑上当前显示的配对码。</p><p><a href=\"/\">返回</a></p>",
+                ),
                 403,
             )
 
-        label = request.get_header("User-Agent") or "浏览器"
-        _client, credential = config.credentials.issue(label)
+        user_agent = request.get_header("User-Agent") or "浏览器"
+        device_name = request.forms.getunicode("device_name") or ""
+        client_hints = {
+            "brands": request.get_header("Sec-CH-UA") or "",
+            "mobile": request.get_header("Sec-CH-UA-Mobile") or "",
+            "platform": request.get_header("Sec-CH-UA-Platform") or "",
+            "model": request.get_header("Sec-CH-UA-Model") or "",
+        }
+        _client, credential = config.credentials.issue(
+            user_agent,
+            device_name,
+            client_hints,
+        )
         response.set_cookie(
             COOKIE_NAME,
             credential,
@@ -151,6 +333,9 @@ def create_application(config: WebConfig) -> tuple[Bottle, str]:
 
     @app.get("/download/<filepath:path>")
     def download(filepath: str) -> HTTPResponse:
+        expired = expired_response()
+        if expired is not None:
+            return expired
         client = require_client()
         if isinstance(client, HTTPResponse):
             return client
@@ -161,22 +346,48 @@ def create_application(config: WebConfig) -> tuple[Bottle, str]:
         except FileNotFoundError:
             return _html_response(_error_page(404, "请求文件不存在。"), 404)
         relative = candidate.relative_to(config.shared_directory.resolve(strict=True)).as_posix()
-        return static_file(
-            relative,
-            root=str(config.shared_directory),
-            download=candidate.name,
-        )
+        try:
+            result = static_file(
+                relative,
+                root=str(config.shared_directory),
+                download=candidate.name,
+            )
+            submitted_id = request.query.getunicode("download_id") or ""
+            download_id = (
+                submitted_id
+                if re.fullmatch(r"[A-Za-z0-9_-]{8,64}", submitted_id)
+                else ""
+            )
+            content_range = result.get_header("Content-Range") or ""
+            range_match = re.match(r"bytes\s+(\d+)-\d+/\d+", content_range)
+            response_length = int(result.get_header("Content-Length") or 0)
+            transfer = lifecycle.begin_transfer(
+                "download",
+                download_id=download_id,
+                expected_size=candidate.stat().st_size if download_id else response_length,
+                range_start=int(range_match.group(1)) if range_match and download_id else 0,
+            )
+            request.environ["landrop.transfer"] = transfer
+            return result
+        except SessionExpiredError:
+            return expired_response() or _html_response(_error_page(503, "会话已到期。"), 503)
 
     @app.post("/upload")
     def upload() -> HTTPResponse:
+        expired = expired_response()
+        if expired is not None:
+            return expired
         client = require_client()
         if isinstance(client, HTTPResponse):
+            lifecycle.record_rejection("authentication")
             return client
 
         content_length = request.content_length
         if content_length < 0:
+            lifecycle.record_rejection("missing_content_length")
             return _html_response(_error_page(411, "上传请求必须提供 Content-Length。"), 411)
         if content_length > config.max_upload_bytes + MULTIPART_OVERHEAD_ALLOWANCE:
+            lifecycle.record_rejection("size_limit")
             return _html_response(
                 _error_page(413, f"上传请求超过 {format_size(config.max_upload_bytes)} 上限。"),
                 413,
@@ -184,23 +395,41 @@ def create_application(config: WebConfig) -> tuple[Bottle, str]:
         try:
             ensure_free_space(config.receive_directory, content_length)
         except InsufficientSpaceError as exc:
+            lifecycle.record_rejection("insufficient_space")
             return _html_response(_error_page(400, str(exc)), 400)
         if not _valid_csrf(csrf_token):
+            lifecycle.record_rejection("csrf")
             return _html_response(_error_page(403, "请求校验失败，请返回首页重试。"), 403)
+        try:
+            transfer = lifecycle.begin_transfer("upload")
+        except SessionExpiredError:
+            return expired_response() or _html_response(_error_page(503, "会话已到期。"), 503)
         try:
             uploaded = request.files.get("file")
             if uploaded is None:
+                transfer.fail("missing_file")
                 return _html_response(_error_page(400, "没有选择上传文件。"), 400)
             result = save_upload(
                 uploaded.file,
                 uploaded.raw_filename,
                 config.receive_directory,
                 config.max_upload_bytes,
+                progress=transfer.add_bytes,
+                check_cancelled=transfer.check_cancelled,
             )
         except UploadTooLargeError as exc:
+            transfer.fail("size_limit")
             return _html_response(_error_page(413, str(exc)), 413)
         except (InvalidFilenameError, InsufficientSpaceError, StorageError) as exc:
+            transfer.fail("storage_error")
             return _html_response(_error_page(400, str(exc)), 400)
+        except TransferCancelledError as exc:
+            transfer.fail(exc.reason)
+            return _html_response(_error_page(503, "传输会话已经结束。"), 503)
+        except Exception:
+            transfer.fail("server_error")
+            raise
+        transfer.complete()
 
         rename_note = "（因同名已自动重命名）" if result.renamed else ""
         message = (
@@ -212,6 +441,9 @@ def create_application(config: WebConfig) -> tuple[Bottle, str]:
 
     @app.post("/unpair")
     def unpair() -> HTTPResponse:
+        expired = expired_response()
+        if expired is not None:
+            return expired
         client = require_client()
         if isinstance(client, HTTPResponse):
             return client
@@ -231,7 +463,8 @@ def create_application(config: WebConfig) -> tuple[Bottle, str]:
     def method_not_allowed(_error: object) -> HTTPResponse:
         return _html_response(_error_page(405, "此地址不允许使用该请求方法。"), 405)
 
-    return app, pairing_code
+    tracked_app = _TrackedApplication(app, lifecycle)
+    return tracked_app, lifecycle.pairing_code
 
 
 def _valid_csrf(expected: str) -> bool:
@@ -243,14 +476,35 @@ def _pairing_page() -> str:
     body = """
     <main class="narrow">
       <h1>连接 LanDrop</h1>
-      <p>请在电脑的 LanDrop 终端中查看本次服务的 8 位配对码。</p>
+      <p>请在电脑的 LanDrop 窗口或控制台中查看当前 8 位配对码。配对成功后该码会立即更新。</p>
       <form action="/pair" method="post">
-        <label>配对码 <input name="code" inputmode="numeric" pattern="[0-9]{8}" maxlength="8" required></label>
+        <label>配对码 <input id="pairingCode" name="code" inputmode="numeric"
+          autocomplete="one-time-code" pattern="[0-9]{8}" required></label>
+        <label>设备名称（可选）
+          <input name="device_name" maxlength="40" autocomplete="off"
+            placeholder="例如：XXX 的 iPhone 16">
+        </label>
         <button type="submit">配对</button>
       </form>
     </main>
+    <script>
+      const pairingCode = document.getElementById('pairingCode');
+      pairingCode.addEventListener('input', () => {
+        pairingCode.value = pairingCode.value.replace(/[^0-9]/g, '').slice(0, 8);
+      });
+      pairingCode.addEventListener('paste', event => {
+        event.preventDefault();
+        const pasted = (event.clipboardData || window.clipboardData).getData('text');
+        pairingCode.value = pasted.replace(/[^0-9]/g, '').slice(0, 8);
+        pairingCode.dispatchEvent(new Event('input', { bubbles: true }));
+      });
+    </script>
     """
     return _page("连接 LanDrop", body)
+
+
+def _pairing_digits(value: str) -> str:
+    return "".join(character for character in value if "0" <= character <= "9")
 
 
 def _error_page(code: int, message: str) -> str:
@@ -263,6 +517,62 @@ def _error_page(code: int, message: str) -> str:
 
 def _html_response(body: str, status: int) -> HTTPResponse:
     return HTTPResponse(body=body, status=status, content_type="text/html; charset=UTF-8")
+
+
+class _TrackedApplication:
+    """Wrap WSGI response iteration so downloads count actual sent bytes."""
+
+    def __init__(self, application: Bottle, lifecycle: SessionLifecycle) -> None:
+        self._application = application
+        self._lifecycle = lifecycle
+
+    def __call__(self, environ: dict[str, Any], start_response: Any) -> Iterable[bytes]:
+        iterable = self._application(environ, start_response)
+        transfer = environ.pop("landrop.transfer", None)
+        if not isinstance(transfer, TransferHandle):
+            return iterable
+        return _TrackedIterable(iterable, transfer)
+
+
+class _TrackedIterable(Iterator[bytes]):
+    def __init__(self, iterable: Iterable[bytes], transfer: TransferHandle) -> None:
+        self._iterable = iterable
+        self._iterator = iter(iterable)
+        self._transfer = transfer
+        self._finished = False
+
+    def __iter__(self) -> _TrackedIterable:
+        return self
+
+    def __next__(self) -> bytes:
+        try:
+            self._transfer.check_cancelled()
+            chunk = next(self._iterator)
+            self._transfer.add_bytes(len(chunk))
+            return chunk
+        except StopIteration:
+            self._finished = True
+            self._transfer.complete()
+            raise
+        except TransferCancelledError as exc:
+            self._finished = True
+            self._transfer.fail(exc.reason)
+            close = getattr(self._iterable, "close", None)
+            if close is not None:
+                close()
+            raise StopIteration
+        except Exception:
+            self._finished = True
+            self._transfer.fail("server_error")
+            raise
+
+    def close(self) -> None:
+        close = getattr(self._iterable, "close", None)
+        if close is not None:
+            close()
+        if not self._finished:
+            self._finished = True
+            self._transfer.fail("client_disconnect")
 
 
 def _page(title: str, body: str) -> str:

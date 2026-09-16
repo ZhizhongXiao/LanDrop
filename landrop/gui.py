@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import os
 from pathlib import Path
 import sys
@@ -10,7 +11,7 @@ import webbrowser
 
 from .cli import (
     DEFAULT_DATA_DIRECTORY,
-    DEFAULT_MAX_UPLOAD_MIB,
+    DEFAULT_MAX_UPLOAD_MB,
     DEFAULT_RECEIVE_DIRECTORY,
     DEFAULT_SHARED_DIRECTORY,
 )
@@ -21,8 +22,14 @@ from .trust import CredentialStore
 class DesktopApi:
     """Small bridge exposed only to the local desktop control page."""
 
-    def __init__(self, controller: ServiceController, webview_module: Any) -> None:
+    def __init__(
+        self,
+        controller: ServiceController,
+        credentials: CredentialStore,
+        webview_module: Any,
+    ) -> None:
         self._controller = controller
+        self._credentials = credentials
         self._webview = webview_module
         self._window: Any | None = None
 
@@ -63,11 +70,11 @@ class DesktopApi:
 
     def start_service(self, options: dict[str, object]) -> dict[str, object]:
         try:
-            max_upload_mib = int(options.get("max_upload_mib", DEFAULT_MAX_UPLOAD_MIB))
+            max_upload_mb = int(options.get("max_upload_mb", DEFAULT_MAX_UPLOAD_MB))
             snapshot = self._controller.start(
                 str(options.get("shared_directory", "")),
                 str(options.get("receive_directory", "")),
-                max_upload_mib,
+                max_upload_mb,
             )
             return {"ok": True, "state": snapshot.to_dict()}
         except (ServiceError, TypeError, ValueError) as exc:
@@ -79,6 +86,12 @@ class DesktopApi:
         except Exception as exc:
             return {"ok": False, "error": f"停止服务失败：{exc}"}
 
+    def reset_deadline(self) -> dict[str, object]:
+        try:
+            return {"ok": True, "state": self._controller.reset_deadline().to_dict()}
+        except ServiceError as exc:
+            return {"ok": False, "error": str(exc), "state": self._controller.snapshot().to_dict()}
+
     def open_transfer_page(self) -> dict[str, object]:
         url = self._controller.snapshot().local_url
         if not url:
@@ -89,8 +102,53 @@ class DesktopApi:
             return {"ok": False, "error": f"无法打开浏览器：{exc}"}
         return {"ok": bool(opened), "error": "" if opened else "系统未能打开浏览器。"}
 
+    def list_trusted_clients(self) -> dict[str, object]:
+        try:
+            clients = [
+                {
+                    "client_id": client.client_id,
+                    "created_at": client.created_at,
+                    "label": client.label,
+                    "device_name": client.device_name,
+                    "device_type": client.device_type,
+                    "operating_system": client.operating_system,
+                    "browser": client.browser,
+                    "device_model": client.device_model,
+                    "browser_engine": client.browser_engine,
+                }
+                for client in self._credentials.list_clients()
+            ]
+            return {"ok": True, "clients": clients}
+        except RuntimeError as exc:
+            return {"ok": False, "error": str(exc), "clients": []}
 
-def main() -> int:
+    def revoke_trusted_client(self, client_id: str) -> dict[str, object]:
+        try:
+            revoked = self._credentials.revoke(client_id)
+            result = self.list_trusted_clients()
+            result["revoked"] = revoked
+            if not revoked and result.get("ok"):
+                result["ok"] = False
+                result["error"] = "该可信设备已不存在。"
+            return result
+        except RuntimeError as exc:
+            return {"ok": False, "error": str(exc), "clients": []}
+
+    def revoke_all_trusted_clients(self) -> dict[str, object]:
+        try:
+            count = self._credentials.revoke_all()
+            return {"ok": True, "count": count, "clients": []}
+        except RuntimeError as exc:
+            return {"ok": False, "error": str(exc), "clients": []}
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(prog="LanDrop Desktop")
+    parser.add_argument("--session-seconds", type=int, default=300)
+    parser.add_argument("--grace-seconds", type=int, default=60)
+    args = parser.parse_args(argv)
+    if not 5 <= args.session_seconds <= 86_400 or not 0 <= args.grace_seconds <= 600:
+        parser.error("session-seconds 需为 5–86400，grace-seconds 需为 0–600")
     if os.name != "nt":
         print("LanDrop 桌面版目前只支持 Windows。", file=sys.stderr)
         return 1
@@ -103,15 +161,20 @@ def main() -> int:
         )
         return 1
 
-    controller = ServiceController(CredentialStore(DEFAULT_DATA_DIRECTORY))
-    api = DesktopApi(controller, webview)
+    credentials = CredentialStore(DEFAULT_DATA_DIRECTORY)
+    controller = ServiceController(
+        credentials,
+        duration_seconds=args.session_seconds,
+        grace_seconds=args.grace_seconds,
+    )
+    api = DesktopApi(controller, credentials, webview)
     window = webview.create_window(
         "LanDrop",
         html=DESKTOP_HTML,
         js_api=api,
         width=720,
-        height=690,
-        min_size=(620, 600),
+        height=780,
+        min_size=(620, 680),
         background_color="#f4f7fb",
         text_select=True,
     )
@@ -119,7 +182,7 @@ def main() -> int:
     try:
         webview.start()
     finally:
-        controller.stop()
+        controller.stop("window_closed")
     return 0
 
 
@@ -158,9 +221,21 @@ DESKTOP_HTML = r"""<!doctype html>
     dt { color: #667085; }
     dd { min-width: 0; margin: 0; overflow-wrap: anywhere; font-weight: 600; }
     .code { color: #175cd3; font-size: 23px; letter-spacing: 3px; }
+    .countdown { font-size: 24px; color: #175cd3; }
+    .countdown.warning { color: #b54708; }
     .notice { min-height: 22px; margin-top: 12px; color: #475467; font-size: 14px; }
     .notice.error { color: #b42318; }
     .security { color: #667085; font-size: 13px; line-height: 1.6; }
+    .clients { display: grid; gap: 10px; }
+    .client { display: grid; grid-template-columns: 1fr auto; gap: 12px; align-items: center; padding: 12px; border: 1px solid #e4e9f1; border-radius: 10px; }
+    .client-main { min-width: 0; }
+    .client-id { font-weight: 700; }
+    .client-meta { margin-top: 4px; color: #667085; font-size: 12px; overflow-wrap: anywhere; }
+    .client-details { margin-top: 8px; color: #475467; font-size: 12px; }
+    .client-details summary { width: fit-content; cursor: pointer; color: #175cd3; user-select: none; }
+    .client-detail-grid { display: grid; grid-template-columns: 86px 1fr; gap: 5px 10px; margin-top: 8px; }
+    .client-detail-label { color: #667085; }
+    .client-detail-value { overflow-wrap: anywhere; }
   </style>
 </head>
 <body>
@@ -182,8 +257,8 @@ DESKTOP_HTML = r"""<!doctype html>
       <input id="received" autocomplete="off">
       <button class="secondary chooser" data-target="received">选择…</button>
     </div>
-    <label for="limit">单文件上传上限（MiB）</label>
-    <input id="limit" type="number" min="1" max="10240" value="1024">
+    <label for="limit">单文件上传上限（MB）</label>
+    <input id="limit" type="number" min="1" max="10000" value="1000">
     <div class="actions">
       <button id="start" class="primary">启动服务</button>
       <button id="stop" class="danger" disabled>停止服务</button>
@@ -195,13 +270,31 @@ DESKTOP_HTML = r"""<!doctype html>
     <h2>当前状态</h2>
     <dl class="status-grid">
       <dt>状态</dt><dd id="message">服务未启动</dd>
+      <dt>剩余时间</dt><dd id="countdown" class="countdown">—</dd>
       <dt>手机地址</dt><dd id="lanUrl">—</dd>
       <dt>本机地址</dt><dd id="localUrl">—</dd>
       <dt>网络接口</dt><dd id="network">—</dd>
       <dt>本次配对码</dt><dd id="pairing" class="code">—</dd>
+      <dt>已配对设备</dt><dd id="paired">0</dd>
+      <dt>活动请求流</dt><dd id="active">0</dd>
+      <dt>文件任务</dt><dd id="statistics">—</dd>
+      <dt>下载请求流</dt><dd id="streamStatistics">—</dd>
+      <dt>停止原因</dt><dd id="stopReason">—</dd>
+      <dt>失败分类</dt><dd id="failureReasons">—</dd>
+      <dt>拒绝分类</dt><dd id="rejectionReasons">—</dd>
     </dl>
     <div class="actions">
       <button id="open" class="secondary" disabled>在浏览器中打开</button>
+      <button id="resetDeadline" class="secondary" disabled>重置为 5 分钟</button>
+    </div>
+  </section>
+
+  <section>
+    <h2>可信设备</h2>
+    <div id="clients" class="clients"><span class="subtitle">正在读取…</span></div>
+    <div class="actions">
+      <button id="refreshClients" class="secondary">刷新列表</button>
+      <button id="revokeAll" class="danger">撤销全部信任</button>
     </div>
   </section>
 
@@ -214,6 +307,11 @@ DESKTOP_HTML = r"""<!doctype html>
   const $ = id => document.getElementById(id);
   let busy = false;
   let configurationInitialized = false;
+  let refreshing = false;
+  let countdownActive = false;
+  let countdownTarget = 0;
+  let trustedRefreshTimer = null;
+  let trustedRefreshStopTimer = null;
 
   function showError(message) {
     $('notice').textContent = message || '';
@@ -222,17 +320,38 @@ DESKTOP_HTML = r"""<!doctype html>
 
   function render(state) {
     const running = Boolean(state.running);
-    $('badge').textContent = running ? '运行中' : (state.phase === 'error' ? '异常' : '已停止');
+    $('badge').textContent = state.phase === 'grace' ? '传输宽限' : (running ? '运行中' : (state.phase === 'error' ? '异常' : '已停止'));
     $('badge').className = 'badge ' + (running ? 'running' : (state.phase === 'error' ? 'error' : ''));
     $('message').textContent = state.message || '—';
     $('lanUrl').textContent = state.lan_url || '—';
     $('localUrl').textContent = state.local_url || '—';
     $('network').textContent = state.interface ? `${state.interface}（${state.network_category}）` : '—';
-    $('pairing').textContent = state.pairing_code || '—';
+    $('pairing').textContent = String(state.pairing_code || '').replace(/[^0-9]/g, '') || '—';
+    const milliseconds = state.phase === 'grace'
+      ? (state.grace_remaining_milliseconds ?? Number(state.grace_remaining_seconds || 0) * 1000)
+      : (state.remaining_milliseconds ?? Number(state.remaining_seconds || 0) * 1000);
+    countdownActive = running;
+    countdownTarget = performance.now() + Math.max(0, Number(milliseconds || 0));
+    tickCountdown();
+    $('paired').textContent = String(state.paired_devices || 0);
+    $('active').textContent = String(state.active_transfers || 0);
+    const stats = state.statistics || {};
+    const completed = (stats.completed_downloads || 0) + (stats.completed_uploads || 0);
+    const failed = (stats.failed_downloads || 0) + (stats.failed_uploads || 0);
+    $('statistics').textContent = `${completed} 成功 / ${failed} 失败；${Number(stats.transferred_mb || 0).toFixed(2)} MB；平均 ${Number(stats.average_mb_s || 0).toFixed(2)} MB/s`;
+    const completedStreams = stats.completed_download_streams || 0;
+    const failedStreams = stats.failed_download_streams || 0;
+    const cancelledStreams = stats.cancelled_download_streams || 0;
+    const streamReasons = formatReasons(stats.stream_failures);
+    const cancellationReasons = formatReasons(stats.stream_cancellations);
+    $('streamStatistics').textContent = `${completedStreams} 完成 / ${failedStreams} 失败 / ${cancelledStreams} 浏览器取消${streamReasons ? `；失败：${streamReasons}` : ''}${cancellationReasons ? `；取消：${cancellationReasons}` : ''}`;
+    $('stopReason').textContent = reasonLabel(state.stop_reason) || '—';
+    $('failureReasons').textContent = formatReasons(stats.failures) || '—';
+    $('rejectionReasons').textContent = formatReasons(stats.rejections) || (stats.rejected_expired_requests ? `会话到期：${stats.rejected_expired_requests}` : '—');
     if (!configurationInitialized) {
       if (state.shared_directory) $('shared').value = state.shared_directory;
       if (state.receive_directory) $('received').value = state.receive_directory;
-      if (state.max_upload_mib) $('limit').value = state.max_upload_mib;
+      if (state.max_upload_mb) $('limit').value = state.max_upload_mb;
       configurationInitialized = true;
     }
     for (const input of [$('shared'), $('received'), $('limit')]) input.disabled = running || busy;
@@ -240,13 +359,121 @@ DESKTOP_HTML = r"""<!doctype html>
     $('start').disabled = running || busy;
     $('stop').disabled = !running || busy;
     $('open').disabled = !running || busy;
+    $('resetDeadline').disabled = state.phase !== 'running' || busy;
+    if (!running) stopTrustedRefreshWindow();
+  }
+
+  function formatTime(totalSeconds) {
+    const value = Math.max(0, Number(totalSeconds || 0));
+    const minutes = Math.floor(value / 60);
+    const seconds = value % 60;
+    return `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
+  }
+
+  function tickCountdown() {
+    if (!countdownActive) {
+      $('countdown').textContent = '—';
+      $('countdown').className = 'countdown';
+      return;
+    }
+    const milliseconds = Math.max(0, countdownTarget - performance.now());
+    const seconds = Math.ceil(milliseconds / 1000);
+    $('countdown').textContent = formatTime(seconds);
+    $('countdown').className = 'countdown ' + (seconds <= 60 ? 'warning' : '');
+  }
+
+  const reasonLabels = {
+    manual_stop: '用户手动停止', window_closed: '关闭窗口', deadline_no_active: '正常到期',
+    deadline_transfers_completed: '到期后传输完成', grace_timeout: '传输宽限耗尽',
+    system_resume: '睡眠恢复', client_disconnect: '客户端主动断开',
+    storage_error: '文件或磁盘错误', server_error: '服务器异常', size_limit: '超过大小限制',
+    authentication: '未通过认证', csrf: '请求校验失败', insufficient_space: '磁盘空间不足',
+    missing_content_length: '缺少内容长度', missing_file: '未选择文件',
+    deadline_expired: '会话到期'
+  };
+
+  function reasonLabel(reason) { return reasonLabels[reason] || reason || ''; }
+
+  function formatReasons(reasons) {
+    return Object.entries(reasons || {}).map(([key, count]) => `${reasonLabel(key)}：${count}`).join('；');
+  }
+
+  function renderClients(clients) {
+    const root = $('clients');
+    const expandedClients = new Set(
+      [...root.querySelectorAll('.client-details[open]')].map(item => item.dataset.clientId)
+    );
+    root.replaceChildren();
+    if (!clients.length) {
+      const empty = document.createElement('span');
+      empty.className = 'subtitle'; empty.textContent = '当前没有可信设备。'; root.appendChild(empty);
+      return;
+    }
+    for (const client of clients) {
+      const row = document.createElement('div'); row.className = 'client';
+      const main = document.createElement('div'); main.className = 'client-main';
+      const id = document.createElement('div'); id.className = 'client-id';
+      id.textContent = client.device_name || client.label || '未命名设备';
+      const meta = document.createElement('div'); meta.className = 'client-meta';
+      const created = client.created_at ? new Date(client.created_at).toLocaleString('zh-CN', { hour12: false }) : '时间未知';
+      meta.textContent = `${client.operating_system || '未知系统'} · ${client.browser || '未知浏览器'} · ${created}`;
+      const details = document.createElement('details'); details.className = 'client-details';
+      details.dataset.clientId = client.client_id;
+      details.open = expandedClients.has(client.client_id);
+      const summary = document.createElement('summary'); summary.textContent = 'ⓘ 详细信息';
+      const grid = document.createElement('div'); grid.className = 'client-detail-grid';
+      const detailRows = [
+        ['设备类型', client.device_type || '未知'],
+        ['报告型号', client.device_model || '浏览器未提供'],
+        ['操作系统', client.operating_system || '未知'],
+        ['浏览器', client.browser || '未知'],
+        ['浏览器内核', client.browser_engine || '未知'],
+        ['配对时间', created],
+        ['客户端标识', client.client_id]
+      ];
+      for (const [label, value] of detailRows) {
+        const key = document.createElement('span'); key.className = 'client-detail-label'; key.textContent = label;
+        const content = document.createElement('span'); content.className = 'client-detail-value'; content.textContent = value;
+        grid.append(key, content);
+      }
+      details.append(summary, grid);
+      const revoke = document.createElement('button'); revoke.className = 'secondary'; revoke.textContent = '撤销信任';
+      revoke.addEventListener('click', async () => {
+        if (!confirm(`确定撤销设备“${id.textContent}”的信任吗？`)) return;
+        const result = await window.pywebview.api.revoke_trusted_client(client.client_id);
+        if (!result.ok) showError(result.error); else renderClients(result.clients);
+      });
+      main.append(id, meta, details); row.append(main, revoke); root.appendChild(row);
+    }
+  }
+
+  async function refreshClients() {
+    const result = await window.pywebview.api.list_trusted_clients();
+    if (!result.ok) showError(result.error); else renderClients(result.clients);
+  }
+
+  function startTrustedRefreshWindow() {
+    stopTrustedRefreshWindow();
+    refreshClients();
+    trustedRefreshTimer = setInterval(refreshClients, 5000);
+    trustedRefreshStopTimer = setTimeout(stopTrustedRefreshWindow, 60000);
+  }
+
+  function stopTrustedRefreshWindow() {
+    if (trustedRefreshTimer !== null) clearInterval(trustedRefreshTimer);
+    if (trustedRefreshStopTimer !== null) clearTimeout(trustedRefreshStopTimer);
+    trustedRefreshTimer = null;
+    trustedRefreshStopTimer = null;
   }
 
   async function refresh() {
+    if (refreshing) return;
+    refreshing = true;
     try {
       const result = await window.pywebview.api.get_state();
       if (result.ok) render(result.state);
     } catch (error) { showError(String(error)); }
+    finally { refreshing = false; }
   }
 
   for (const button of document.querySelectorAll('.chooser')) {
@@ -264,11 +491,12 @@ DESKTOP_HTML = r"""<!doctype html>
     const result = await window.pywebview.api.start_service({
       shared_directory: $('shared').value,
       receive_directory: $('received').value,
-      max_upload_mib: $('limit').value
+      max_upload_mb: $('limit').value
     });
     busy = false;
     if (!result.ok) showError(result.error);
     render(result.state);
+    if (result.ok && result.state.running) startTrustedRefreshWindow();
   });
 
   $('stop').addEventListener('click', async () => {
@@ -283,9 +511,26 @@ DESKTOP_HTML = r"""<!doctype html>
     if (!result.ok) showError(result.error);
   });
 
+  $('resetDeadline').addEventListener('click', async () => {
+    busy = true; showError(''); await refresh();
+    const result = await window.pywebview.api.reset_deadline();
+    busy = false;
+    if (!result.ok) showError(result.error);
+    render(result.state);
+  });
+
+  $('refreshClients').addEventListener('click', refreshClients);
+  $('revokeAll').addEventListener('click', async () => {
+    if (!confirm('确定撤销全部可信设备吗？所有浏览器下次访问都需要重新配对。')) return;
+    const result = await window.pywebview.api.revoke_all_trusted_clients();
+    if (!result.ok) showError(result.error); else renderClients(result.clients);
+  });
+
   window.addEventListener('pywebviewready', async () => {
     await refresh();
-    setInterval(refresh, 1200);
+    await refreshClients();
+    setInterval(tickCountdown, 200);
+    setInterval(refresh, 1000);
   });
 </script>
 </body>

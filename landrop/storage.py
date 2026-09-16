@@ -11,7 +11,7 @@ import secrets
 import shutil
 import threading
 import unicodedata
-from typing import BinaryIO
+from typing import BinaryIO, Callable
 
 
 COPY_CHUNK_SIZE = 1024 * 1024
@@ -101,6 +101,9 @@ def save_upload(
     raw_filename: str,
     receive_directory: Path,
     max_bytes: int,
+    *,
+    progress: Callable[[int], None] | None = None,
+    check_cancelled: Callable[[], None] | None = None,
 ) -> UploadResult:
     """Stream an upload through a unique .part file and atomically finalize it."""
     safe_name = sanitize_filename(raw_filename)
@@ -110,6 +113,8 @@ def save_upload(
     try:
         with part_path.open("xb") as output:
             while True:
+                if check_cancelled is not None:
+                    check_cancelled()
                 chunk = source.read(COPY_CHUNK_SIZE)
                 if not chunk:
                     break
@@ -119,6 +124,8 @@ def save_upload(
                         f"文件超过 {format_size(max_bytes)} 的上传上限。"
                     )
                 output.write(chunk)
+                if progress is not None:
+                    progress(len(chunk))
             output.flush()
             os.fsync(output.fileno())
 
@@ -174,10 +181,10 @@ def resolve_shared_file(shared_directory: Path, relative_path: str) -> Path:
 
 def format_size(size: int) -> str:
     value = float(size)
-    for unit in ("B", "KiB", "MiB", "GiB", "TiB"):
-        if value < 1024 or unit == "TiB":
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if value < 1000 or unit == "TB":
             return f"{value:.0f} {unit}" if unit == "B" else f"{value:.1f} {unit}"
-        value /= 1024
+        value /= 1000
     return f"{size} B"
 
 

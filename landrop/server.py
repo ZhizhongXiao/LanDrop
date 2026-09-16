@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sys
+import socket
 import threading
 from socketserver import ThreadingMixIn
 from typing import Any
@@ -12,7 +13,7 @@ from wsgiref.simple_server import WSGIRequestHandler, WSGIServer, make_server
 class LanDropRequestHandler(WSGIRequestHandler):
     """Readable request logging without reverse DNS lookups."""
 
-    server_version = "LanDrop/0.2"
+    server_version = "LanDrop/0.4"
 
     def address_string(self) -> str:
         return self.client_address[0]
@@ -24,6 +25,36 @@ class LanDropRequestHandler(WSGIRequestHandler):
 class ThreadedWSGIServer(ThreadingMixIn, WSGIServer):
     daemon_threads = True
     allow_reuse_address = True
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._connections: set[Any] = set()
+        self._connections_lock = threading.Lock()
+
+    def process_request(self, request: Any, client_address: tuple[str, int]) -> None:
+        with self._connections_lock:
+            self._connections.add(request)
+        super().process_request(request, client_address)
+
+    def shutdown_request(self, request: Any) -> None:
+        try:
+            super().shutdown_request(request)
+        finally:
+            with self._connections_lock:
+                self._connections.discard(request)
+
+    def close_active_connections(self) -> None:
+        with self._connections_lock:
+            connections = tuple(self._connections)
+        for connection in connections:
+            try:
+                connection.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+            try:
+                connection.close()
+            except OSError:
+                pass
 
     def handle_error(self, request: object, client_address: tuple[str, int]) -> None:
         error = sys.exc_info()[1]
@@ -98,6 +129,8 @@ class ServerGroup:
             for server in self._servers:
                 if self._threads:
                     server.shutdown()
+                if isinstance(server, ThreadedWSGIServer):
+                    server.close_active_connections()
                 server.server_close()
             for thread in self._threads:
                 thread.join(timeout=3)

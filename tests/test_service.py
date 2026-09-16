@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 import threading
 import unittest
@@ -62,19 +63,53 @@ class ServiceControllerTests(unittest.TestCase):
         self.assertTrue(running.running)
         self.assertEqual(running.lan_url, "http://192.168.50.10:8000/")
         self.assertEqual(running.local_url, "http://127.0.0.1:8000/")
-        self.assertEqual(running.pairing_code, "12345678")
-        self.assertEqual(running.max_upload_mib, 32)
+        self.assertRegex(running.pairing_code, r"^\d{8}$")
+        self.assertEqual(running.max_upload_mb, 32)
 
         stopped = self.controller.stop()
         self.assertFalse(stopped.running)
         self.assertEqual(stopped.phase, "stopped")
         self.assertEqual(stopped.lan_url, "")
         self.assertTrue(self.servers[0].closed.is_set())
+        log_path = self.root / "data" / "logs" / "sessions.jsonl"
+        record = json.loads(log_path.read_text(encoding="utf-8").splitlines()[-1])
+        self.assertEqual(record["stop_reason"], "manual_stop")
+        self.assertNotIn("pairing_code", record)
 
     def test_rejects_second_start(self) -> None:
         self.controller.start(self.shared, self.received)
         with self.assertRaisesRegex(ServiceError, "已经在运行"):
             self.controller.start(self.shared, self.received)
+
+    def test_old_session_cannot_stop_restarted_session(self) -> None:
+        self.controller.start(self.shared, self.received)
+        old_server = self.servers[-1]
+        old_lifecycle = self.controller._lifecycle
+        self.controller.stop()
+        self.controller.start(self.shared, self.received)
+
+        state = self.controller.stop(
+            "deadline_no_active",
+            _expected_server=old_server,
+            _expected_lifecycle=old_lifecycle,
+        )
+
+        self.assertTrue(state.running)
+        self.assertIsNot(self.servers[-1], old_server)
+
+    def test_window_close_cancels_active_transfer_and_records_reason(self) -> None:
+        self.controller.start(self.shared, self.received)
+        assert self.controller._lifecycle is not None
+        transfer = self.controller._lifecycle.begin_transfer("download")
+        transfer.add_bytes(250_000)
+
+        stopped = self.controller.stop("window_closed")
+
+        self.assertFalse(stopped.running)
+        self.assertEqual(stopped.stop_reason, "window_closed")
+        self.assertEqual(stopped.statistics["failed_downloads"], 1)
+        self.assertEqual(stopped.statistics["failures"], {"window_closed": 1})
+        self.assertTrue(self.servers[-1].closed.is_set())
 
     def test_rejects_missing_directory_and_invalid_limit(self) -> None:
         with self.assertRaisesRegex(ServiceError, "请选择共享目录"):

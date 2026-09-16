@@ -7,8 +7,9 @@ import unittest
 from urllib.parse import urlencode
 from wsgiref.util import setup_testing_defaults
 
+from landrop.lifecycle import SessionLifecycle
 from landrop.trust import CredentialStore
-from landrop.web import WebConfig, create_application
+from landrop.web import WebConfig, _TrackedIterable, create_application
 from support import temporary_directory
 
 
@@ -22,8 +23,9 @@ class BottleApplicationTests(unittest.TestCase):
         self.received.mkdir()
         (self.shared / "hello.txt").write_text("hello", encoding="utf-8")
         self.store = CredentialStore(root / "data")
+        self.lifecycle = SessionLifecycle()
         self.app, self.code = create_application(
-            WebConfig(self.shared, self.received, 1024, self.store)
+            WebConfig(self.shared, self.received, 1024, self.store, self.lifecycle)
         )
 
     def tearDown(self) -> None:
@@ -34,7 +36,7 @@ class BottleApplicationTests(unittest.TestCase):
         self.assertTrue(status.startswith("200"))
         self.assertIn("连接 LanDrop", body.decode())
 
-        form = urlencode({"code": self.code}).encode()
+        form = urlencode({"code": f" {self.code} ", "device_name": "测试手机"}).encode()
         status, headers, _body = wsgi_request(
             self.app,
             "/pair",
@@ -44,6 +46,9 @@ class BottleApplicationTests(unittest.TestCase):
         )
         self.assertTrue(status.startswith("303"), status)
         cookie = headers["Set-Cookie"].split(";", 1)[0]
+        self.assertNotEqual(self.lifecycle.pairing_code, self.code)
+        self.assertEqual(self.lifecycle.snapshot().paired_devices, 1)
+        self.assertEqual(self.store.list_clients()[0].device_name, "测试手机")
 
         status, _headers, body = wsgi_request(self.app, "/", cookie=cookie)
         self.assertTrue(status.startswith("200"))
@@ -60,6 +65,29 @@ class BottleApplicationTests(unittest.TestCase):
         self.assertTrue(status.startswith("200"))
         self.assertEqual(body, b"hello")
         self.assertIn("attachment", headers["Content-Disposition"])
+        self.assertEqual(self.lifecycle.snapshot().statistics["downloaded_mb"], 0.000005)
+
+        status, headers, body = wsgi_request(
+            self.app,
+            "/download/hello.txt",
+            cookie=cookie,
+            range_header="bytes=2-4",
+        )
+        self.assertTrue(status.startswith("206"), status)
+        self.assertEqual(body, b"llo")
+        self.assertEqual(headers["Content-Range"], "bytes 2-4/5")
+
+        status, _headers, body = wsgi_request(
+            self.app, "/prepare-download/hello.txt", cookie=cookie
+        )
+        self.assertTrue(status.startswith("200"))
+        self.assertIn("下载可能显示为", body.decode())
+
+        status, _headers, body = wsgi_request(
+            self.app, "/session-status", cookie=cookie
+        )
+        self.assertTrue(status.startswith("200"))
+        self.assertIn('"phase": "running"', body.decode())
 
         upload_body, content_type = multipart_upload(csrf, "中文.txt", b"uploaded")
         status, _headers, body = wsgi_request(
@@ -72,6 +100,7 @@ class BottleApplicationTests(unittest.TestCase):
         )
         self.assertTrue(status.startswith("201"), body.decode())
         self.assertEqual((self.received / "中文.txt").read_bytes(), b"uploaded")
+        self.assertEqual(self.lifecycle.snapshot().statistics["uploaded_mb"], 0.000008)
 
         unpair_form = urlencode({"csrf": csrf}).encode()
         status, _headers, _body = wsgi_request(
@@ -100,6 +129,87 @@ class BottleApplicationTests(unittest.TestCase):
         )
         self.assertTrue(status.startswith("403"))
 
+    def test_expired_session_rejects_new_request(self) -> None:
+        now = [10.0]
+        lifecycle = SessionLifecycle(5, 1, clock=lambda: now[0])
+        app, _code = create_application(
+            WebConfig(self.shared, self.received, 1024, self.store, lifecycle)
+        )
+        now[0] = 15.0
+        status, _headers, body = wsgi_request(app, "/")
+        self.assertTrue(status.startswith("503"))
+        self.assertIn("会话已到期", body.decode())
+        self.assertEqual(lifecycle.snapshot().statistics["rejected_expired_requests"], 1)
+
+    def test_expected_download_cancellation_ends_iteration_cleanly(self) -> None:
+        lifecycle = SessionLifecycle()
+        transfer = lifecycle.begin_transfer("download")
+        response = _TrackedIterable([b"content"], transfer)
+
+        lifecycle.stop("manual_stop", "manual_stop")
+
+        self.assertEqual(list(response), [])
+        statistics = lifecycle.snapshot().statistics
+        self.assertEqual(statistics["failed_downloads"], 1)
+        self.assertEqual(statistics["failures"], {"manual_stop": 1})
+
+    def test_each_start_groups_its_ranges_as_one_logical_download(self) -> None:
+        _client, credential = self.store.issue("Test Browser")
+        cookie = f"landrop_trust={credential}"
+        status, _headers, body = wsgi_request(
+            self.app,
+            "/prepare-download/hello.txt",
+            cookie=cookie,
+        )
+        self.assertTrue(status.startswith("200"))
+        self.assertIn("/start-download/hello.txt", body.decode())
+
+        status, _headers, ticket_body = wsgi_request(
+            self.app,
+            "/start-download/hello.txt",
+            cookie=cookie,
+        )
+        self.assertTrue(status.startswith("200"))
+        match = re.search(r"download_id=([A-Za-z0-9_-]+)", ticket_body.decode())
+        self.assertIsNotNone(match)
+        assert match is not None
+        query = f"download_id={match.group(1)}"
+
+        for byte_range in ("bytes=0-1", "bytes=2-4"):
+            status, _headers, _body = wsgi_request(
+                self.app,
+                "/download/hello.txt",
+                cookie=cookie,
+                range_header=byte_range,
+                query_string=query,
+            )
+            self.assertTrue(status.startswith("206"), status)
+
+        statistics = self.lifecycle.snapshot().statistics
+        self.assertEqual(statistics["completed_downloads"], 1)
+        self.assertEqual(statistics["completed_download_streams"], 2)
+        self.assertEqual(statistics["downloaded_mb"], 0.000005)
+
+        status, _headers, ticket_body = wsgi_request(
+            self.app,
+            "/start-download/hello.txt",
+            cookie=cookie,
+        )
+        second_match = re.search(r"download_id=([A-Za-z0-9_-]+)", ticket_body.decode())
+        self.assertIsNotNone(second_match)
+        assert second_match is not None
+        status, _headers, _body = wsgi_request(
+            self.app,
+            "/download/hello.txt",
+            cookie=cookie,
+            query_string=f"download_id={second_match.group(1)}",
+        )
+        self.assertTrue(status.startswith("200"))
+        statistics = self.lifecycle.snapshot().statistics
+        self.assertEqual(statistics["completed_downloads"], 2)
+        self.assertEqual(statistics["completed_download_streams"], 3)
+        self.assertEqual(statistics["downloaded_mb"], 0.00001)
+
 
 def wsgi_request(
     app: object,
@@ -109,17 +219,22 @@ def wsgi_request(
     body: bytes = b"",
     content_type: str = "",
     cookie: str = "",
+    range_header: str = "",
+    query_string: str = "",
 ) -> tuple[str, dict[str, str], bytes]:
     environ: dict[str, object] = {}
     setup_testing_defaults(environ)
     environ["REQUEST_METHOD"] = method
     environ["PATH_INFO"] = path
+    environ["QUERY_STRING"] = query_string
     environ["wsgi.input"] = BytesIO(body)
     environ["CONTENT_LENGTH"] = str(len(body))
     if content_type:
         environ["CONTENT_TYPE"] = content_type
     if cookie:
         environ["HTTP_COOKIE"] = cookie
+    if range_header:
+        environ["HTTP_RANGE"] = range_header
     captured: dict[str, object] = {}
 
     def start_response(status: str, headers: list[tuple[str, str]], _exc_info=None) -> None:
