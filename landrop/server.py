@@ -5,9 +5,12 @@ from __future__ import annotations
 import sys
 import socket
 import threading
-from socketserver import ThreadingMixIn
+from socketserver import TCPServer, ThreadingMixIn
 from typing import Any
 from wsgiref.simple_server import WSGIRequestHandler, WSGIServer, make_server
+
+
+SHUTDOWN_POLL_INTERVAL_SECONDS = 0.1
 
 
 class LanDropRequestHandler(WSGIRequestHandler):
@@ -30,6 +33,19 @@ class ThreadedWSGIServer(ThreadingMixIn, WSGIServer):
         super().__init__(*args, **kwargs)
         self._connections: set[Any] = set()
         self._connections_lock = threading.Lock()
+
+    def server_bind(self) -> None:
+        """Bind without HTTPServer's blocking reverse-DNS lookup.
+
+        LanDrop only needs the numeric bind address in the WSGI environment.
+        ``HTTPServer.server_bind`` calls ``socket.getfqdn`` and can stall for
+        about five seconds on phone hotspots without reverse DNS.
+        """
+        TCPServer.server_bind(self)
+        host, port = self.server_address[:2]
+        self.server_name = str(host)
+        self.server_port = int(port)
+        self.setup_environ()
 
     def process_request(self, request: Any, client_address: tuple[str, int]) -> None:
         with self._connections_lock:
@@ -111,6 +127,7 @@ class ServerGroup:
                 address, port = server.server_address[:2]
                 thread = threading.Thread(
                     target=server.serve_forever,
+                    kwargs={"poll_interval": SHUTDOWN_POLL_INTERVAL_SECONDS},
                     name=f"LanDrop-{address}:{port}",
                     daemon=True,
                 )

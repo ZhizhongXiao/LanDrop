@@ -88,6 +88,7 @@ class SessionStatistics:
 @dataclass(frozen=True, slots=True)
 class LifecycleSnapshot:
     session_id: str
+    deadline_revision: int
     phase: str
     remaining_seconds: int
     grace_remaining_seconds: int
@@ -158,6 +159,7 @@ class SessionLifecycle:
         self._lock = threading.RLock()
         now = self._clock()
         self._session_id = uuid.uuid4().hex
+        self._deadline_revision = 1
         self._deadline = now + self._duration
         self._grace_deadline: float | None = None
         self._last_heartbeat = now
@@ -212,6 +214,7 @@ class SessionLifecycle:
             if self._phase != "running" or now >= self._deadline:
                 raise SessionExpiredError("本次会话已经到期，无法重置倒计时。")
             self._deadline = now + seconds
+            self._deadline_revision += 1
             return self._snapshot_locked(now)
 
     def accepts_new_requests(self) -> bool:
@@ -457,6 +460,7 @@ class SessionLifecycle:
             grace_remaining_ms = math.ceil(max(0.0, self._grace_deadline - now) * 1000)
         return LifecycleSnapshot(
             session_id=self._session_id,
+            deadline_revision=self._deadline_revision,
             phase=self._phase,
             remaining_seconds=remaining,
             grace_remaining_seconds=grace_remaining,

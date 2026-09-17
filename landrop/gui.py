@@ -15,7 +15,10 @@ from .cli import (
     DEFAULT_RECEIVE_DIRECTORY,
     DEFAULT_SHARED_DIRECTORY,
 )
+from .coordinator import ActionCoordinator
+from .notifications import WindowsToastBackend
 from .service import ServiceController, ServiceError
+from .tray import LanDropTray, TrayUnavailableError
 from .trust import CredentialStore
 
 
@@ -32,9 +35,13 @@ class DesktopApi:
         self._credentials = credentials
         self._webview = webview_module
         self._window: Any | None = None
+        self._coordinator: ActionCoordinator | None = None
 
     def attach_window(self, window: Any) -> None:
         self._window = window
+
+    def attach_coordinator(self, coordinator: ActionCoordinator) -> None:
+        self._coordinator = coordinator
 
     def get_state(self) -> dict[str, object]:
         state = self._controller.snapshot().to_dict()
@@ -71,7 +78,9 @@ class DesktopApi:
     def start_service(self, options: dict[str, object]) -> dict[str, object]:
         try:
             max_upload_mb = int(options.get("max_upload_mb", DEFAULT_MAX_UPLOAD_MB))
-            snapshot = self._controller.start(
+            if self._coordinator is None:
+                raise RuntimeError("桌面运行时尚未准备完成。")
+            snapshot = self._coordinator.start_from_gui(
                 str(options.get("shared_directory", "")),
                 str(options.get("receive_directory", "")),
                 max_upload_mb,
@@ -82,13 +91,20 @@ class DesktopApi:
 
     def stop_service(self) -> dict[str, object]:
         try:
-            return {"ok": True, "state": self._controller.stop().to_dict()}
+            if self._coordinator is None:
+                raise RuntimeError("桌面运行时尚未准备完成。")
+            return {"ok": True, "state": self._coordinator.stop_from_ui().state.to_dict()}
         except Exception as exc:
             return {"ok": False, "error": f"停止服务失败：{exc}"}
 
     def reset_deadline(self) -> dict[str, object]:
         try:
-            return {"ok": True, "state": self._controller.reset_deadline().to_dict()}
+            if self._coordinator is None:
+                raise RuntimeError("桌面运行时尚未准备完成。")
+            result = self._coordinator.reset_from_tray()
+            if not result.applied:
+                return {"ok": False, "error": result.message, "state": result.state.to_dict()}
+            return {"ok": True, "state": result.state.to_dict()}
         except ServiceError as exc:
             return {"ok": False, "error": str(exc), "state": self._controller.snapshot().to_dict()}
 
@@ -142,6 +158,23 @@ class DesktopApi:
             return {"ok": False, "error": str(exc), "clients": []}
 
 
+class _WindowDispatcher:
+    """Centralize every pywebview window mutation away from callback threads."""
+
+    def __init__(self, window: Any) -> None:
+        self._window = window
+
+    def hide_window(self) -> None:
+        self._window.hide()
+
+    def show_window(self) -> None:
+        self._window.show()
+        self._window.restore()
+
+    def destroy_window(self) -> None:
+        self._window.destroy()
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="LanDrop Desktop")
     parser.add_argument("--session-seconds", type=int, default=300)
@@ -166,6 +199,7 @@ def main(argv: list[str] | None = None) -> int:
         credentials,
         duration_seconds=args.session_seconds,
         grace_seconds=args.grace_seconds,
+        emit_performance_timings=True,
     )
     api = DesktopApi(controller, credentials, webview)
     window = webview.create_window(
@@ -179,10 +213,49 @@ def main(argv: list[str] | None = None) -> int:
         text_select=True,
     )
     api.attach_window(window)
+    window_dispatcher = _WindowDispatcher(window)
+    coordinator = ActionCoordinator(controller, window_dispatcher)
+    api.attach_coordinator(coordinator)
+    toasts = WindowsToastBackend(
+        lambda action, session_id, revision: coordinator.submit_toast_action(
+            action,
+            session_id=session_id,
+            deadline_revision=revision,
+        )
+    )
+    try:
+        toasts.start()
+    except Exception as exc:
+        print(f"[通知] Windows Toast 不可用：{exc}", file=sys.stderr)
+    else:
+        coordinator.bind_toasts(toasts)
+        coordinator.start_expiry_monitor(
+            toasts.send_expiry_reminder,
+            toasts.send_service_stopped,
+        )
+
+    tray = LanDropTray(
+        state_provider=controller.snapshot,
+        open_window=coordinator.submit_show_window,
+        reset=coordinator.reset_from_tray,
+        stop_service=coordinator.stop_from_ui,
+        exit_application=lambda: coordinator.request_exit("app_exit"),
+    )
+    coordinator.bind_tray(tray)
+    coordinator.set_state_listener(lambda _state: tray.refresh())
+    try:
+        tray.start()
+    except TrayUnavailableError as exc:
+        print(f"[托盘] {exc}；关闭窗口将退出 LanDrop。", file=sys.stderr)
+
+    def on_window_closing() -> bool:
+        return coordinator.close_request(tray_ready=tray.ready)
+
+    window.events.closing += on_window_closing
     try:
         webview.start()
     finally:
-        controller.stop("window_closed")
+        coordinator.request_exit("app_exit")
     return 0
 
 
@@ -300,7 +373,7 @@ DESKTOP_HTML = r"""<!doctype html>
 
   <section class="security">
     服务只会在 Windows 确认为 Private 的 LAN 接口上启动，并同时监听本机回环地址。
-    关闭窗口会停止服务并关闭端口；窗口不承担文件传输。
+    关闭窗口会隐藏到系统托盘；请在托盘菜单中选择“退出 LanDrop”以停止服务并关闭端口。窗口不承担文件传输。
   </section>
 </main>
 <script>
@@ -316,6 +389,11 @@ DESKTOP_HTML = r"""<!doctype html>
   function showError(message) {
     $('notice').textContent = message || '';
     $('notice').className = message ? 'notice error' : 'notice';
+  }
+
+  function showInfo(message) {
+    $('notice').textContent = message || '';
+    $('notice').className = 'notice';
   }
 
   function render(state) {
@@ -383,7 +461,7 @@ DESKTOP_HTML = r"""<!doctype html>
   }
 
   const reasonLabels = {
-    manual_stop: '用户手动停止', window_closed: '关闭窗口', deadline_no_active: '正常到期',
+    manual_stop: '用户手动停止', app_exit: '退出 LanDrop', window_closed: '关闭窗口（历史）', deadline_no_active: '正常到期',
     deadline_transfers_completed: '到期后传输完成', grace_timeout: '传输宽限耗尽',
     system_resume: '睡眠恢复', client_disconnect: '客户端主动断开',
     storage_error: '文件或磁盘错误', server_error: '服务器异常', size_limit: '超过大小限制',
@@ -487,7 +565,10 @@ DESKTOP_HTML = r"""<!doctype html>
   }
 
   $('start').addEventListener('click', async () => {
-    busy = true; showError(''); await refresh();
+    busy = true;
+    showInfo('正在检测 Private 网络并启动服务……');
+    await refresh();
+    showInfo('正在检测 Private 网络并启动服务……');
     const result = await window.pywebview.api.start_service({
       shared_directory: $('shared').value,
       receive_directory: $('received').value,
@@ -495,6 +576,7 @@ DESKTOP_HTML = r"""<!doctype html>
     });
     busy = false;
     if (!result.ok) showError(result.error);
+    else showInfo('');
     render(result.state);
     if (result.ok && result.state.running) startTrustedRefreshWindow();
   });

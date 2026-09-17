@@ -111,6 +111,68 @@ class ServiceControllerTests(unittest.TestCase):
         self.assertEqual(stopped.statistics["failures"], {"window_closed": 1})
         self.assertTrue(self.servers[-1].closed.is_set())
 
+    def test_expected_action_rejects_old_revision_and_old_session(self) -> None:
+        initial = self.controller.start(self.shared, self.received)
+        reset, current = self.controller.apply_expected_action(
+            "reset",
+            session_id=initial.session_id,
+            deadline_revision=initial.deadline_revision,
+        )
+        self.assertTrue(reset)
+        self.assertEqual(current.deadline_revision, initial.deadline_revision + 1)
+
+        stale, unchanged = self.controller.apply_expected_action(
+            "stop",
+            session_id=initial.session_id,
+            deadline_revision=initial.deadline_revision,
+        )
+        self.assertFalse(stale)
+        self.assertTrue(unchanged.running)
+
+        self.controller.stop()
+        restarted = self.controller.start(self.shared, self.received)
+        old_session, state = self.controller.apply_expected_action(
+            "stop",
+            session_id=initial.session_id,
+            deadline_revision=current.deadline_revision,
+        )
+        self.assertFalse(old_session)
+        self.assertTrue(state.running)
+        self.assertEqual(state.session_id, restarted.session_id)
+
+    def test_expected_reset_and_stop_are_atomic_under_race(self) -> None:
+        initial = self.controller.start(self.shared, self.received)
+        barrier = threading.Barrier(3)
+        results: list[tuple[str, bool]] = []
+
+        def apply(action: str) -> None:
+            barrier.wait()
+            applied, _state = self.controller.apply_expected_action(
+                action,
+                session_id=initial.session_id,
+                deadline_revision=initial.deadline_revision,
+            )
+            results.append((action, applied))
+
+        workers = [
+            threading.Thread(target=apply, args=("reset",)),
+            threading.Thread(target=apply, args=("stop",)),
+        ]
+        for worker in workers:
+            worker.start()
+        barrier.wait()
+        for worker in workers:
+            worker.join(8)
+
+        self.assertTrue(all(not worker.is_alive() for worker in workers))
+        self.assertEqual(len(results), 2)
+        self.assertEqual(sum(applied for _action, applied in results), 1)
+        current = self.controller.snapshot()
+        if current.running:
+            self.assertEqual(current.deadline_revision, initial.deadline_revision + 1)
+        else:
+            self.assertEqual(current.stop_reason, "manual_stop")
+
     def test_rejects_missing_directory_and_invalid_limit(self) -> None:
         with self.assertRaisesRegex(ServiceError, "请选择共享目录"):
             self.controller.start("", self.received)

@@ -28,6 +28,7 @@ class SessionLifecycleTests(unittest.TestCase):
         )
 
     def test_countdown_reset_restores_five_minutes(self) -> None:
+        self.assertEqual(self.lifecycle.snapshot().deadline_revision, 1)
         self.assertEqual(self.lifecycle.snapshot().remaining_seconds, 300)
         self.clock.advance(0.5)
         self.assertEqual(self.lifecycle.snapshot().remaining_milliseconds, 299_500)
@@ -35,6 +36,7 @@ class SessionLifecycleTests(unittest.TestCase):
         self.assertEqual(self.lifecycle.snapshot().remaining_seconds, 280)
         self.lifecycle.reset_deadline(300)
         self.assertEqual(self.lifecycle.snapshot().remaining_seconds, 300)
+        self.assertEqual(self.lifecycle.snapshot().deadline_revision, 2)
 
     def test_activation_reanchors_deadline_after_startup_work(self) -> None:
         self.clock.advance(5)
