@@ -16,7 +16,7 @@ SHUTDOWN_POLL_INTERVAL_SECONDS = 0.1
 class LanDropRequestHandler(WSGIRequestHandler):
     """Readable request logging without reverse DNS lookups."""
 
-    server_version = "LanDrop/0.4"
+    server_version = "LanDrop/0.5"
 
     def address_string(self) -> str:
         return self.client_address[0]
