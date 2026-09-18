@@ -39,6 +39,7 @@ $items = Get-NetConnectionProfile -ErrorAction Stop |
 
 _BENCHMARK_NETWORK = ipaddress.ip_network("198.18.0.0/15")
 _ERROR_INSUFFICIENT_BUFFER = 122
+RUNTIME_CATEGORY_TIMEOUT_SECONDS = 2.0
 
 _EXCLUDED_WORDS = (
     "meta",
@@ -64,6 +65,33 @@ class NetworkDiscoveryError(RuntimeError):
 
 
 @dataclass(frozen=True, slots=True)
+class EndpointBaseline:
+    """Session-scoped identity of the interface and address actually bound."""
+
+    interface_index: int
+    address: str
+    category: str
+    alias: str
+
+
+@dataclass(frozen=True, slots=True)
+class EndpointObservation:
+    """One lightweight observation of a frozen endpoint."""
+
+    address_present: bool | None
+    category: str | None = None
+    error: str = ""
+
+    @property
+    def explicitly_public(self) -> bool:
+        return (self.category or "").casefold() == "public"
+
+    @property
+    def category_private(self) -> bool:
+        return (self.category or "").casefold() == "private"
+
+
+@dataclass(frozen=True, slots=True)
 class LanInterface:
     alias: str
     interface_index: int
@@ -72,6 +100,22 @@ class LanInterface:
     connectivity: str
     has_gateway: bool | None
     description: str
+
+    def to_diagnostic_dict(self) -> dict[str, object]:
+        return {
+            "alias": self.alias,
+            "interface_index": self.interface_index,
+            "address": self.address,
+            "category": self.category,
+            "connectivity": self.connectivity,
+            "has_gateway": self.has_gateway,
+            "description": self.description,
+            "role": (
+                "excluded"
+                if self.is_excluded or not self.is_lan_ipv4
+                else "lan_candidate"
+            ),
+        }
 
     @property
     def is_private_profile(self) -> bool:
@@ -137,6 +181,72 @@ def discover_interfaces() -> list[LanInterface]:
     return interfaces
 
 
+def endpoint_baseline(interface: LanInterface) -> EndpointBaseline:
+    """Freeze the selected endpoint for this service session only."""
+    return EndpointBaseline(
+        interface_index=interface.interface_index,
+        address=interface.address,
+        category=interface.category,
+        alias=interface.alias,
+    )
+
+
+class EndpointChecker:
+    """Check one frozen endpoint without repeating full interface discovery."""
+
+    def __init__(
+        self,
+        baseline: EndpointBaseline,
+        *,
+        address_reader=None,
+        category_reader=None,
+    ) -> None:
+        self.baseline = baseline
+        self._address_reader = address_reader or _read_ipv4_table
+        self._category_reader = category_reader or (
+            lambda interface_index: read_network_category(
+                interface_index,
+                alias=baseline.alias,
+            )
+        )
+
+    def observe(self, *, include_category: bool = False) -> EndpointObservation:
+        try:
+            addresses = self._address_reader()
+        except Exception as exc:
+            return EndpointObservation(None, error=f"IPv4 查询失败：{exc}")
+
+        present = (self.baseline.address, self.baseline.interface_index) in addresses
+        if not include_category:
+            return EndpointObservation(present)
+
+        try:
+            category = self._category_reader(self.baseline.interface_index)
+        except Exception as exc:
+            return EndpointObservation(present, error=f"网络类别查询失败：{exc}")
+        return EndpointObservation(present, category=category)
+
+
+def read_network_category(
+    interface_index: int,
+    *,
+    alias: str = "",
+    timeout: float = RUNTIME_CATEGORY_TIMEOUT_SECONDS,
+) -> str:
+    """Read one interface's current category; failure remains fail-closed."""
+    profiles, error = _read_connection_profiles_result(timeout=timeout)
+    if error:
+        if alias.casefold() in {"wlan", "wi-fi", "wifi"} or "wireless" in alias.casefold():
+            fallback = _read_wifi_registry_profile()
+            if fallback is not None:
+                return str(fallback.get("category") or "Unknown")
+        raise NetworkDiscoveryError(error)
+    profile = profiles.get(interface_index)
+    if profile is None:
+        return "Unknown"
+    return str(profile.get("category") or "Unknown")
+
+
 def _read_wifi_registry_profile() -> dict[str, object] | None:
     """Fallback for restricted shells: match the active SSID to NetworkList."""
     netsh = os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "System32", "netsh.exe")
@@ -189,6 +299,14 @@ def _read_wifi_registry_profile() -> dict[str, object] | None:
 
 def _read_connection_profiles() -> dict[int, dict[str, object]]:
     """Read Network List profiles; failure becomes Unknown and remains fail-closed."""
+    profiles, _error = _read_connection_profiles_result(timeout=15)
+    return profiles
+
+
+def _read_connection_profiles_result(
+    *, timeout: float
+) -> tuple[dict[int, dict[str, object]], str]:
+    """Return profiles plus a diagnostic error for lightweight category checks."""
     creation_flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
     try:
         completed = subprocess.run(
@@ -206,20 +324,23 @@ def _read_connection_profiles() -> dict[int, dict[str, object]]:
             capture_output=True,
             encoding="utf-8-sig",
             errors="replace",
-            timeout=15,
+            timeout=timeout,
             creationflags=creation_flags,
         )
-    except (OSError, subprocess.SubprocessError):
-        return {}
+    except subprocess.TimeoutExpired:
+        return {}, "Windows 网络类别查询超时。"
+    except (OSError, subprocess.SubprocessError) as exc:
+        return {}, f"Windows 网络类别查询失败：{exc}"
 
     if completed.returncode != 0:
-        return {}
+        detail = (completed.stderr or "").strip()
+        return {}, detail or "Windows 网络类别查询未成功。"
 
     output = completed.stdout.strip()
     try:
         records = json.loads(output or "[]")
     except json.JSONDecodeError:
-        return {}
+        return {}, "Windows 网络类别查询返回了无法解析的数据。"
 
     if isinstance(records, dict):
         records = [records]
@@ -230,7 +351,7 @@ def _read_connection_profiles() -> dict[int, dict[str, object]]:
             profiles[int(record["interface_index"])] = record
         except (KeyError, TypeError, ValueError):
             continue
-    return profiles
+    return profiles, ""
 
 
 class _MibIpAddrRow(ctypes.Structure):

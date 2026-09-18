@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 from pathlib import Path
+from unittest.mock import patch
 import unittest
 
 from landrop.gui import DesktopApi
 from landrop.service import ServiceController
+from landrop.service import ServiceSnapshot
 from landrop.trust import CredentialStore
 from tests.support import temporary_directory
 
@@ -42,6 +44,63 @@ class DesktopTrustApiTests(unittest.TestCase):
             all_revoked = api.revoke_all_trusted_clients()
             self.assertEqual(all_revoked["count"], 1)
             self.assertEqual(store.list_clients(), [])
+
+    def test_settings_entry_is_whitelisted(self) -> None:
+        with temporary_directory() as temporary:
+            store = CredentialStore(Path(temporary))
+            api = DesktopApi(ServiceController(store), store, object())
+
+            rejected = api.open_windows_settings("command")
+            self.assertFalse(rejected["ok"])
+
+            with patch("landrop.gui.os.startfile", create=True) as startfile:
+                accepted = api.open_windows_settings("network")
+            self.assertTrue(accepted["ok"])
+            startfile.assert_called_once_with("ms-settings:network-status")
+
+    def test_refresh_diagnostics_returns_controller_snapshot(self) -> None:
+        with temporary_directory() as temporary:
+            store = CredentialStore(Path(temporary))
+
+            class Controller:
+                def refresh_diagnostics(self) -> ServiceSnapshot:
+                    return ServiceSnapshot(
+                        running=False,
+                        phase="stopped",
+                        message="服务未启动",
+                        shared_directory="",
+                        receive_directory="",
+                        max_upload_mb=1000,
+                        diagnostics={"status": "checking"},
+                    )
+
+            api = DesktopApi(Controller(), store, object())
+            result = api.refresh_diagnostics()
+
+            self.assertTrue(result["ok"])
+            self.assertEqual(result["state"]["diagnostics"]["status"], "checking")
+
+    def test_lists_interfaces_from_controller(self) -> None:
+        with temporary_directory() as temporary:
+            store = CredentialStore(Path(temporary))
+
+            class Controller:
+                def available_interfaces(self) -> list[dict[str, object]]:
+                    return [
+                        {
+                            "alias": "Ethernet",
+                            "interface_index": 7,
+                            "address": "192.168.50.1",
+                            "category": "Private",
+                            "role": "lan_candidate",
+                        }
+                    ]
+
+            api = DesktopApi(Controller(), store, object())
+            result = api.list_interfaces()
+
+            self.assertTrue(result["ok"])
+            self.assertEqual(result["interfaces"][0]["address"], "192.168.50.1")
 
 
 if __name__ == "__main__":

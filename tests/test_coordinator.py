@@ -66,6 +66,7 @@ class _Controller:
             deadline_revision=1,
         )
         self.actions: list[str] = []
+        self.start_args: tuple[object, ...] | None = None
 
     def snapshot(self) -> ServiceSnapshot:
         return self.state
@@ -96,6 +97,7 @@ class _Controller:
         return self.state
 
     def start(self, *_args):
+        self.start_args = _args
         return self.state
 
 
@@ -225,6 +227,38 @@ class ActionCoordinatorTests(unittest.TestCase):
         coordinator.request_exit()
         self.assertFalse(stopped_notice_sent.is_set())
 
+    def test_network_change_publishes_stopped_state_then_sends_notice(self) -> None:
+        events: list[str] = []
+        coordinator = ActionCoordinator(
+            self.controller,
+            self.window,
+            toasts=self.toasts,
+            on_state_changed=lambda state: events.append("tray_stopped")
+            if not state.running
+            else None,
+        )
+        coordinator.start_expiry_monitor(
+            lambda _session, _revision: False,
+            lambda reason: events.append(f"toast:{reason}") or True,
+        )
+        time.sleep(0.3)
+
+        self.controller.state = ServiceSnapshot(
+            **{
+                **self.controller.state.to_dict(),
+                "running": False,
+                "phase": "stopped",
+                "stop_reason": "network_changed",
+            }
+        )
+        deadline = time.monotonic() + 1
+        while "toast:network_changed" not in events and time.monotonic() < deadline:
+            time.sleep(0.01)
+        coordinator.request_exit()
+
+        self.assertIn("toast:network_changed", events)
+        self.assertLess(events.index("tray_stopped"), events.index("toast:network_changed"))
+
     def test_window_can_reopen_while_toast_stop_is_still_finishing(self) -> None:
         controller = _BlockingStopController()
         window = _Window()
@@ -248,6 +282,19 @@ class ActionCoordinatorTests(unittest.TestCase):
             stop_thread.join(2)
             show_thread.join(2)
             coordinator.request_exit()
+
+    def test_gui_start_forwards_explicit_interface_selector(self) -> None:
+        self.coordinator.start_from_gui(
+            "shared",
+            "received",
+            1000,
+            "192.168.50.1",
+        )
+
+        self.assertEqual(
+            self.controller.start_args,
+            ("shared", "received", 1000, "192.168.50.1"),
+        )
 
 
 if __name__ == "__main__":

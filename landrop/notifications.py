@@ -15,6 +15,7 @@ AUTOMATIC_STOP_MESSAGES = {
     "deadline_transfers_completed": "现有传输已经完成，端口 8000 已关闭。",
     "grace_timeout": "传输宽限时间已结束，端口 8000 已关闭。",
     "system_resume": "检测到电脑从睡眠恢复，服务和端口已安全关闭。",
+    "network_changed": "网络环境已变化，服务和端口已安全关闭。",
 }
 
 

@@ -4,7 +4,7 @@ from io import BytesIO
 from pathlib import Path
 import re
 import unittest
-from urllib.parse import urlencode
+from urllib.parse import quote, urlencode
 from wsgiref.util import setup_testing_defaults
 
 from landrop.lifecycle import SessionLifecycle
@@ -58,6 +58,8 @@ class BottleApplicationTests(unittest.TestCase):
         self.assertIsNotNone(match)
         assert match is not None
         csrf = match.group(1)
+        self.assertIn("/upload/raw", decoded)
+        self.assertIn("xhr.upload.addEventListener('progress'", decoded)
 
         status, headers, body = wsgi_request(
             self.app, "/download/hello.txt", cookie=cookie
@@ -102,6 +104,22 @@ class BottleApplicationTests(unittest.TestCase):
         self.assertEqual((self.received / "中文.txt").read_bytes(), b"uploaded")
         self.assertEqual(self.lifecycle.snapshot().statistics["uploaded_mb"], 0.000008)
 
+        status, _headers, body = wsgi_request(
+            self.app,
+            "/upload/raw",
+            method="POST",
+            body=b"raw-data",
+            content_type="application/octet-stream",
+            cookie=cookie,
+            extra_headers={
+                "HTTP_X_LANDROP_CSRF": csrf,
+                "HTTP_X_LANDROP_FILENAME": quote("流式 文件.txt", safe=""),
+            },
+        )
+        self.assertTrue(status.startswith("201"), body.decode())
+        self.assertEqual((self.received / "流式 文件.txt").read_bytes(), b"raw-data")
+        self.assertEqual(self.lifecycle.snapshot().statistics["uploaded_mb"], 0.000016)
+
         unpair_form = urlencode({"csrf": csrf}).encode()
         status, _headers, _body = wsgi_request(
             self.app,
@@ -117,6 +135,88 @@ class BottleApplicationTests(unittest.TestCase):
     def test_upload_requires_authentication(self) -> None:
         status, _headers, _body = wsgi_request(self.app, "/upload", method="POST")
         self.assertTrue(status.startswith("401"))
+        status, _headers, _body = wsgi_request(self.app, "/upload/raw", method="POST")
+        self.assertTrue(status.startswith("401"))
+
+    def test_raw_upload_rejects_wrong_csrf_without_creating_files(self) -> None:
+        cookie, _csrf = self._trusted_session()
+
+        status, _headers, _body = wsgi_request(
+            self.app,
+            "/upload/raw",
+            method="POST",
+            body=b"content",
+            content_type="application/octet-stream",
+            cookie=cookie,
+            extra_headers={
+                "HTTP_X_LANDROP_CSRF": "wrong-token",
+                "HTTP_X_LANDROP_FILENAME": "blocked.txt",
+            },
+        )
+
+        self.assertTrue(status.startswith("403"), status)
+        snapshot = self.lifecycle.snapshot()
+        self.assertEqual(snapshot.active_transfers, 0)
+        self.assertEqual(snapshot.statistics["rejections"], {"csrf": 1})
+        self.assertEqual(list(self.received.iterdir()), [])
+
+    def test_raw_upload_rejects_declared_oversize_before_transfer(self) -> None:
+        cookie, csrf = self._trusted_session()
+
+        status, _headers, _body = wsgi_request(
+            self.app,
+            "/upload/raw",
+            method="POST",
+            body=b"x" * 1025,
+            content_type="application/octet-stream",
+            cookie=cookie,
+            extra_headers={
+                "HTTP_X_LANDROP_CSRF": csrf,
+                "HTTP_X_LANDROP_FILENAME": "too-large.bin",
+            },
+        )
+
+        self.assertTrue(status.startswith("413"), status)
+        snapshot = self.lifecycle.snapshot()
+        self.assertEqual(snapshot.active_transfers, 0)
+        self.assertEqual(snapshot.statistics["rejections"], {"size_limit": 1})
+        self.assertEqual(snapshot.statistics["failed_uploads"], 0)
+        self.assertEqual(list(self.received.iterdir()), [])
+
+    def test_raw_upload_cleans_partial_file_after_early_disconnect(self) -> None:
+        cookie, csrf = self._trusted_session()
+
+        status, _headers, body = wsgi_request(
+            self.app,
+            "/upload/raw",
+            method="POST",
+            body=b"short",
+            content_length=10,
+            content_type="application/octet-stream",
+            cookie=cookie,
+            extra_headers={
+                "HTTP_X_LANDROP_CSRF": csrf,
+                "HTTP_X_LANDROP_FILENAME": "interrupted.bin",
+            },
+        )
+
+        self.assertTrue(status.startswith("400"), body.decode())
+        snapshot = self.lifecycle.snapshot()
+        self.assertEqual(snapshot.active_transfers, 0)
+        self.assertEqual(snapshot.statistics["failed_uploads"], 1)
+        self.assertEqual(snapshot.statistics["failed_upload_mb"], 0.000005)
+        self.assertEqual(snapshot.statistics["failures"], {"client_disconnect": 1})
+        self.assertEqual(list(self.received.iterdir()), [])
+
+    def _trusted_session(self) -> tuple[str, str]:
+        _client, credential = self.store.issue("Test Browser")
+        cookie = f"landrop_trust={credential}"
+        status, _headers, body = wsgi_request(self.app, "/", cookie=cookie)
+        self.assertTrue(status.startswith("200"), status)
+        match = re.search(r'name="csrf" value="([^"]+)"', body.decode())
+        self.assertIsNotNone(match)
+        assert match is not None
+        return cookie, match.group(1)
 
     def test_rejects_wrong_pairing_code(self) -> None:
         form = urlencode({"code": "00000000"}).encode()
@@ -221,6 +321,8 @@ def wsgi_request(
     cookie: str = "",
     range_header: str = "",
     query_string: str = "",
+    extra_headers: dict[str, str] | None = None,
+    content_length: int | None = None,
 ) -> tuple[str, dict[str, str], bytes]:
     environ: dict[str, object] = {}
     setup_testing_defaults(environ)
@@ -228,13 +330,15 @@ def wsgi_request(
     environ["PATH_INFO"] = path
     environ["QUERY_STRING"] = query_string
     environ["wsgi.input"] = BytesIO(body)
-    environ["CONTENT_LENGTH"] = str(len(body))
+    environ["CONTENT_LENGTH"] = str(len(body) if content_length is None else content_length)
     if content_type:
         environ["CONTENT_TYPE"] = content_type
     if cookie:
         environ["HTTP_COOKIE"] = cookie
     if range_header:
         environ["HTTP_RANGE"] = range_header
+    if extra_headers:
+        environ.update(extra_headers)
     captured: dict[str, object] = {}
 
     def start_response(status: str, headers: list[tuple[str, str]], _exc_info=None) -> None:

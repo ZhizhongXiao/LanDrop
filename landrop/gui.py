@@ -84,10 +84,17 @@ class DesktopApi:
                 str(options.get("shared_directory", "")),
                 str(options.get("receive_directory", "")),
                 max_upload_mb,
+                str(options.get("interface_selector") or "") or None,
             )
             return {"ok": True, "state": snapshot.to_dict()}
         except (ServiceError, TypeError, ValueError) as exc:
             return {"ok": False, "error": str(exc), "state": self._controller.snapshot().to_dict()}
+
+    def list_interfaces(self) -> dict[str, object]:
+        try:
+            return {"ok": True, "interfaces": self._controller.available_interfaces()}
+        except Exception as exc:
+            return {"ok": False, "error": f"无法刷新网络接口：{exc}", "interfaces": []}
 
     def stop_service(self) -> dict[str, object]:
         try:
@@ -117,6 +124,27 @@ class DesktopApi:
         except webbrowser.Error as exc:
             return {"ok": False, "error": f"无法打开浏览器：{exc}"}
         return {"ok": bool(opened), "error": "" if opened else "系统未能打开浏览器。"}
+
+    def refresh_diagnostics(self) -> dict[str, object]:
+        try:
+            return {"ok": True, "state": self._controller.refresh_diagnostics().to_dict()}
+        except Exception as exc:
+            return {"ok": False, "error": f"无法刷新诊断：{exc}"}
+
+    def open_windows_settings(self, target: str) -> dict[str, object]:
+        targets = {
+            "network": "ms-settings:network-status",
+            "firewall": "windowsdefender://network/",
+            "proxy": "ms-settings:network-proxy",
+        }
+        uri = targets.get(target)
+        if uri is None:
+            return {"ok": False, "error": "未知的 Windows 设置入口。"}
+        try:
+            os.startfile(uri)  # type: ignore[attr-defined]
+        except (OSError, AttributeError) as exc:
+            return {"ok": False, "error": f"无法打开 Windows 设置：{exc}"}
+        return {"ok": True}
 
     def list_trusted_clients(self) -> dict[str, object]:
         try:
@@ -276,13 +304,18 @@ DESKTOP_HTML = r"""<!doctype html>
     .badge { border-radius: 999px; padding: 7px 12px; background: #e9edf4; color: #475467; font-weight: 600; }
     .badge.running { background: #dcfae6; color: #087443; }
     .badge.error { background: #fee4e2; color: #b42318; }
+    .tabs { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; margin-bottom: 16px; padding: 4px; border-radius: 11px; background: #e9edf4; }
+    .tab { color: #475467; background: transparent; }
+    .tab.active { color: #175cd3; background: #fff; box-shadow: 0 1px 4px rgba(21, 35, 62, .12); }
+    .page { display: none; }
+    .page.active { display: block; }
     section { margin-bottom: 14px; padding: 20px; background: #fff; border: 1px solid #e4e9f1; border-radius: 14px; box-shadow: 0 5px 18px rgba(21, 35, 62, .05); }
     h2 { margin: 0 0 16px; font-size: 17px; }
     label { display: block; margin: 14px 0 6px; color: #344054; font-size: 13px; font-weight: 600; }
     .path-row { display: grid; grid-template-columns: 1fr auto; gap: 8px; }
-    input { min-width: 0; width: 100%; border: 1px solid #cfd6e1; border-radius: 9px; padding: 10px 12px; color: #172033; background: #fff; font: inherit; }
-    input:focus { outline: 2px solid #bfd2ff; border-color: #3974e8; }
-    input:disabled { color: #667085; background: #f2f4f7; }
+    input, select { min-width: 0; width: 100%; border: 1px solid #cfd6e1; border-radius: 9px; padding: 10px 12px; color: #172033; background: #fff; font: inherit; }
+    input:focus, select:focus { outline: 2px solid #bfd2ff; border-color: #3974e8; }
+    input:disabled, select:disabled { color: #667085; background: #f2f4f7; }
     button { border: 0; border-radius: 9px; padding: 10px 16px; font: inherit; font-weight: 600; cursor: pointer; }
     button:disabled { cursor: default; opacity: .5; }
     .secondary { color: #344054; background: #eef2f7; }
@@ -309,6 +342,14 @@ DESKTOP_HTML = r"""<!doctype html>
     .client-detail-grid { display: grid; grid-template-columns: 86px 1fr; gap: 5px 10px; margin-top: 8px; }
     .client-detail-label { color: #667085; }
     .client-detail-value { overflow-wrap: anywhere; }
+    .diagnostic-list { display: grid; gap: 10px; }
+    .diagnostic-item { padding: 12px; border: 1px solid #e4e9f1; border-radius: 9px; background: #f9fafb; }
+    .diagnostic-title { font-weight: 700; }
+    .diagnostic-meta { margin-top: 4px; color: #667085; font-size: 12px; white-space: pre-wrap; overflow-wrap: anywhere; }
+    .diagnostic-ok { color: #087443; }
+    .diagnostic-warning { color: #b54708; }
+    .diagnostic-unknown { color: #667085; }
+    .settings-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
   </style>
 </head>
 <body>
@@ -317,6 +358,14 @@ DESKTOP_HTML = r"""<!doctype html>
     <div><h1>LanDrop</h1><p class="subtitle">可信局域网文件传输</p></div>
     <span id="badge" class="badge">已停止</span>
   </header>
+
+  <nav class="tabs" aria-label="LanDrop 页面">
+    <button class="tab active" data-page="mainPage">主控</button>
+    <button class="tab" data-page="infoPage">信息</button>
+    <button class="tab" data-page="settingsPage">设置</button>
+  </nav>
+
+  <div id="mainPage" class="page active">
 
   <section>
     <h2>文件目录</h2>
@@ -332,6 +381,13 @@ DESKTOP_HTML = r"""<!doctype html>
     </div>
     <label for="limit">单文件上传上限（MB）</label>
     <input id="limit" type="number" min="1" max="10000" value="1000">
+    <label for="interfaceSelector">服务网络接口</label>
+    <div class="path-row">
+      <select id="interfaceSelector">
+        <option value="">自动选择（仅一个 Private LAN 时）</option>
+      </select>
+      <button id="refreshInterfaces" class="secondary">刷新接口</button>
+    </div>
     <div class="actions">
       <button id="start" class="primary">启动服务</button>
       <button id="stop" class="danger" disabled>停止服务</button>
@@ -375,6 +431,56 @@ DESKTOP_HTML = r"""<!doctype html>
     服务只会在 Windows 确认为 Private 的 LAN 接口上启动，并同时监听本机回环地址。
     关闭窗口会隐藏到系统托盘；请在托盘菜单中选择“退出 LanDrop”以停止服务并关闭端口。窗口不承担文件传输。
   </section>
+  </div>
+
+  <div id="infoPage" class="page">
+    <section>
+      <h2>当前网络基线</h2>
+      <dl class="status-grid">
+        <dt>Endpoint</dt><dd id="endpointSummary">—</dd>
+        <dt>运行期校验</dt><dd id="endpointHealth">—</dd>
+        <dt>诊断状态</dt><dd id="diagnosticStatus">尚未检测</dd>
+        <dt>监听地址</dt><dd id="listenSummary">—</dd>
+        <dt>传输摘要</dt><dd id="transferSummary">—</dd>
+      </dl>
+    </section>
+    <section>
+      <h2>可见网络接口</h2>
+      <div id="interfaceList" class="diagnostic-list"><span class="subtitle">尚未检测。</span></div>
+    </section>
+    <section>
+      <h2>网络详细信息</h2>
+      <div id="adapterDetails" class="diagnostic-list"><span class="subtitle">正在等待异步诊断。</span></div>
+    </section>
+    <section>
+      <h2>Windows 防火墙</h2>
+      <div id="firewallSummary" class="diagnostic-unknown">尚未检测。</div>
+      <div id="firewallEvidence" class="diagnostic-list" style="margin-top: 12px"></div>
+    </section>
+  </div>
+
+  <div id="settingsPage" class="page">
+    <section>
+      <h2>诊断与恢复</h2>
+      <p class="security">重新检测只刷新 LanDrop 的只读诊断信息，不会改变网络类别、防火墙规则、代理、VPN 或静态 IP。</p>
+      <div class="actions">
+        <button id="refreshDiagnostics" class="primary">重新检测</button>
+      </div>
+      <div id="settingsNotice" class="notice"></div>
+    </section>
+    <section>
+      <h2>Windows 设置入口</h2>
+      <div class="settings-actions">
+        <button class="secondary settings-link" data-target="network">网络设置</button>
+        <button class="secondary settings-link" data-target="firewall">防火墙设置</button>
+        <button class="secondary settings-link" data-target="proxy">代理设置</button>
+        <button class="secondary" id="returnMain">返回主控</button>
+      </div>
+    </section>
+    <section class="security">
+      LanDrop 只检测、解释并提供 Windows 官方设置入口。是否修改系统配置始终由用户决定。
+    </section>
+  </div>
 </main>
 <script>
   const $ = id => document.getElementById(id);
@@ -426,14 +532,16 @@ DESKTOP_HTML = r"""<!doctype html>
     $('stopReason').textContent = reasonLabel(state.stop_reason) || '—';
     $('failureReasons').textContent = formatReasons(stats.failures) || '—';
     $('rejectionReasons').textContent = formatReasons(stats.rejections) || (stats.rejected_expired_requests ? `会话到期：${stats.rejected_expired_requests}` : '—');
+    renderDiagnostics(state, stats);
     if (!configurationInitialized) {
       if (state.shared_directory) $('shared').value = state.shared_directory;
       if (state.receive_directory) $('received').value = state.receive_directory;
       if (state.max_upload_mb) $('limit').value = state.max_upload_mb;
       configurationInitialized = true;
     }
-    for (const input of [$('shared'), $('received'), $('limit')]) input.disabled = running || busy;
+    for (const input of [$('shared'), $('received'), $('limit'), $('interfaceSelector')]) input.disabled = running || busy;
     for (const button of document.querySelectorAll('.chooser')) button.disabled = running || busy;
+    $('refreshInterfaces').disabled = running || busy;
     $('start').disabled = running || busy;
     $('stop').disabled = !running || busy;
     $('open').disabled = !running || busy;
@@ -464,6 +572,7 @@ DESKTOP_HTML = r"""<!doctype html>
     manual_stop: '用户手动停止', app_exit: '退出 LanDrop', window_closed: '关闭窗口（历史）', deadline_no_active: '正常到期',
     deadline_transfers_completed: '到期后传输完成', grace_timeout: '传输宽限耗尽',
     system_resume: '睡眠恢复', client_disconnect: '客户端主动断开',
+    network_changed: '网络环境变化',
     storage_error: '文件或磁盘错误', server_error: '服务器异常', size_limit: '超过大小限制',
     authentication: '未通过认证', csrf: '请求校验失败', insufficient_space: '磁盘空间不足',
     missing_content_length: '缺少内容长度', missing_file: '未选择文件',
@@ -474,6 +583,79 @@ DESKTOP_HTML = r"""<!doctype html>
 
   function formatReasons(reasons) {
     return Object.entries(reasons || {}).map(([key, count]) => `${reasonLabel(key)}：${count}`).join('；');
+  }
+
+  function renderDiagnostics(state, stats) {
+    const endpoint = state.interface_index
+      ? `#${state.interface_index} · ${state.bound_ipv4 || '地址未知'} · ${state.network_category || '类别未知'} · ${state.interface || '未命名接口'}`
+      : '尚未建立服务 endpoint';
+    $('endpointSummary').textContent = endpoint;
+    const endpointLabels = {
+      healthy: '正常', confirming: '正在二次确认', changed: '已变化', inactive: '未启用'
+    };
+    $('endpointHealth').textContent = `${endpointLabels[state.endpoint_status] || state.endpoint_status || '未启用'}${state.endpoint_detail ? `；${state.endpoint_detail}` : ''}`;
+    $('listenSummary').textContent = state.running
+      ? `${state.lan_url || '—'}；${state.local_url || '—'}`
+      : '端口未监听';
+    $('transferSummary').textContent = `${Number(stats.transferred_mb || 0).toFixed(2)} MB；平均 ${Number(stats.average_mb_s || 0).toFixed(2)} MB/s；活动请求流 ${state.active_transfers || 0}`;
+
+    const diagnostics = state.diagnostics || {};
+    const diagnosticLabels = { checking: '检测中', ready: '已更新', unknown: '无法确定', idle: '尚未检测' };
+    $('diagnosticStatus').textContent = `${diagnosticLabels[diagnostics.status] || diagnostics.status || '尚未检测'}${diagnostics.message ? `；${diagnostics.message}` : ''}`;
+    const network = diagnostics.network || {};
+    renderDiagnosticItems(
+      $('interfaceList'),
+      network.interfaces || [],
+      item => ({
+        title: `${item.alias || '未命名接口'} · ${item.address || '无 IPv4'}`,
+        meta: `InterfaceIndex ${item.interface_index || '—'} · ${item.category || 'Unknown'} · ${item.connectivity || 'Unknown'} · ${item.role === 'excluded' ? '不作为 LAN 候选' : 'LAN 候选'}`
+      }),
+      network.discovery_error || '未检测到接口。'
+    );
+    renderDiagnosticItems(
+      $('adapterDetails'),
+      network.adapters || [],
+      item => ({
+        title: `${item.alias || '未命名接口'} · ${item.status || '状态未知'} · ${item.link_speed || '速率未知'}`,
+        meta: `InterfaceIndex ${item.interface_index || '—'}\nIPv4：${listText(item.ipv4)}\n网关：${listText(item.gateways)}\nDNS：${listText(item.dns)}`
+      }),
+      network.message || '详细信息不可用。'
+    );
+
+    const firewall = diagnostics.firewall || {};
+    const firewallStatus = diagnosticLabels[firewall.status] || firewall.status || '尚未检测';
+    $('firewallSummary').textContent = `${firewallStatus}；${firewall.message || '—'}${firewall.status === 'ready' ? `；精确端口允许 ${firewall.exact_port_allow || 0}；程序允许 ${firewall.program_allow || 0}；宽泛允许 ${firewall.broad_allow || 0}；相关阻止 ${firewall.relevant_blocks || 0}` : ''}`;
+    $('firewallSummary').className = `diagnostic-${firewall.level === 'ok' ? 'ok' : (firewall.level === 'warning' ? 'warning' : 'unknown')}`;
+    renderDiagnosticItems(
+      $('firewallEvidence'),
+      firewall.evidence || [],
+      item => ({
+        title: `${item.action || 'Unknown'} · ${item.name || '未命名规则'}`,
+        meta: `${item.profile || 'Unknown'} · ${item.protocol || 'Any'}:${item.local_port || 'Any'} · ${item.program || 'Any'}`
+      }),
+      firewall.status === 'checking' ? '正在读取规则……' : '没有可展示的相关规则证据。'
+    );
+  }
+
+  function renderDiagnosticItems(root, items, formatter, emptyMessage) {
+    root.replaceChildren();
+    if (!items.length) {
+      const empty = document.createElement('span');
+      empty.className = 'subtitle'; empty.textContent = emptyMessage; root.appendChild(empty);
+      return;
+    }
+    for (const item of items) {
+      const view = formatter(item);
+      const row = document.createElement('div'); row.className = 'diagnostic-item';
+      const title = document.createElement('div'); title.className = 'diagnostic-title'; title.textContent = view.title;
+      const meta = document.createElement('div'); meta.className = 'diagnostic-meta'; meta.textContent = view.meta;
+      row.append(title, meta); root.appendChild(row);
+    }
+  }
+
+  function listText(value) {
+    if (Array.isArray(value)) return value.join(', ') || '—';
+    return value ? String(value) : '—';
   }
 
   function renderClients(clients) {
@@ -530,6 +712,28 @@ DESKTOP_HTML = r"""<!doctype html>
     if (!result.ok) showError(result.error); else renderClients(result.clients);
   }
 
+  async function refreshInterfaces() {
+    const selector = $('interfaceSelector');
+    const previous = selector.value;
+    const result = await window.pywebview.api.list_interfaces();
+    if (!result.ok) { showError(result.error); return; }
+    selector.replaceChildren();
+    const automatic = document.createElement('option');
+    automatic.value = ''; automatic.textContent = '自动选择（仅一个 Private LAN 时）';
+    selector.appendChild(automatic);
+    for (const item of result.interfaces || []) {
+      const option = document.createElement('option');
+      option.value = item.address || '';
+      const usable = item.role !== 'excluded' && String(item.category || '').toLowerCase() === 'private';
+      option.disabled = !usable;
+      option.textContent = `${item.alias || '未命名接口'} · ${item.address || '无 IPv4'} · ${item.category || 'Unknown'}${usable ? '' : ' · 不可选'}`;
+      selector.appendChild(option);
+    }
+    if ([...selector.options].some(option => option.value === previous && !option.disabled)) {
+      selector.value = previous;
+    }
+  }
+
   function startTrustedRefreshWindow() {
     stopTrustedRefreshWindow();
     refreshClients();
@@ -554,6 +758,15 @@ DESKTOP_HTML = r"""<!doctype html>
     finally { refreshing = false; }
   }
 
+  function showPage(pageId) {
+    for (const page of document.querySelectorAll('.page')) page.classList.toggle('active', page.id === pageId);
+    for (const tab of document.querySelectorAll('.tab')) tab.classList.toggle('active', tab.dataset.page === pageId);
+  }
+
+  for (const tab of document.querySelectorAll('.tab')) {
+    tab.addEventListener('click', () => showPage(tab.dataset.page));
+  }
+
   for (const button of document.querySelectorAll('.chooser')) {
     button.addEventListener('click', async () => {
       const input = $(button.dataset.target);
@@ -572,7 +785,8 @@ DESKTOP_HTML = r"""<!doctype html>
     const result = await window.pywebview.api.start_service({
       shared_directory: $('shared').value,
       receive_directory: $('received').value,
-      max_upload_mb: $('limit').value
+      max_upload_mb: $('limit').value,
+      interface_selector: $('interfaceSelector').value
     });
     busy = false;
     if (!result.ok) showError(result.error);
@@ -602,14 +816,33 @@ DESKTOP_HTML = r"""<!doctype html>
   });
 
   $('refreshClients').addEventListener('click', refreshClients);
+  $('refreshInterfaces').addEventListener('click', refreshInterfaces);
   $('revokeAll').addEventListener('click', async () => {
     if (!confirm('确定撤销全部可信设备吗？所有浏览器下次访问都需要重新配对。')) return;
     const result = await window.pywebview.api.revoke_all_trusted_clients();
     if (!result.ok) showError(result.error); else renderClients(result.clients);
   });
 
+  $('refreshDiagnostics').addEventListener('click', async () => {
+    $('refreshDiagnostics').disabled = true;
+    $('settingsNotice').textContent = '已开始异步诊断；可切换到“信息”页查看进度。';
+    const result = await window.pywebview.api.refresh_diagnostics();
+    $('refreshDiagnostics').disabled = false;
+    if (!result.ok) $('settingsNotice').textContent = result.error;
+    else render(result.state);
+  });
+
+  for (const button of document.querySelectorAll('.settings-link')) {
+    button.addEventListener('click', async () => {
+      const result = await window.pywebview.api.open_windows_settings(button.dataset.target);
+      $('settingsNotice').textContent = result.ok ? '' : result.error;
+    });
+  }
+  $('returnMain').addEventListener('click', () => showPage('mainPage'));
+
   window.addEventListener('pywebviewready', async () => {
     await refresh();
+    await refreshInterfaces();
     await refreshClients();
     setInterval(tickCountdown, 200);
     setInterval(refresh, 1000);

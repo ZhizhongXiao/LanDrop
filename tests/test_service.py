@@ -3,17 +3,54 @@ from __future__ import annotations
 import json
 from pathlib import Path
 import threading
+import time
 import unittest
 
+from landrop.network import EndpointObservation
 from landrop.service import ServiceController, ServiceError
 from landrop.trust import CredentialStore
 from tests.support import temporary_directory
 
 
 class _Interface:
+    interface_index = 12
     address = "192.168.50.10"
     alias = "Test WLAN"
     category = "Private"
+    connectivity = "Internet"
+    has_gateway = True
+    description = "Test adapter"
+
+
+class _StableEndpointChecker:
+    def observe(self, *, include_category: bool = False) -> EndpointObservation:
+        return EndpointObservation(True, category="Private" if include_category else None)
+
+
+class _SequenceEndpointChecker:
+    def __init__(self, observations: list[EndpointObservation]) -> None:
+        self._observations = list(observations)
+        self._lock = threading.Lock()
+
+    def observe(self, *, include_category: bool = False) -> EndpointObservation:
+        with self._lock:
+            if len(self._observations) > 1:
+                return self._observations.pop(0)
+            return self._observations[0]
+
+
+def _ready_diagnostics(_port: int, _program: str) -> dict[str, object]:
+    return {
+        "status": "ready",
+        "message": "diagnostics ready",
+        "network": {"status": "ready", "adapters": []},
+        "firewall": {
+            "status": "ready",
+            "level": "ok",
+            "message": "firewall ready",
+            "evidence": [],
+        },
+    }
 
 
 class _FakeServer:
@@ -51,6 +88,8 @@ class ServiceControllerTests(unittest.TestCase):
             select=lambda interfaces, selector: interfaces[0],
             application_factory=lambda config: (object(), "12345678"),
             server_factory=server_factory,
+            endpoint_checker_factory=lambda _baseline: _StableEndpointChecker(),
+            diagnostics_factory=_ready_diagnostics,
         )
 
     def tearDown(self) -> None:
@@ -65,6 +104,9 @@ class ServiceControllerTests(unittest.TestCase):
         self.assertEqual(running.local_url, "http://127.0.0.1:8000/")
         self.assertRegex(running.pairing_code, r"^\d{8}$")
         self.assertEqual(running.max_upload_mb, 32)
+        self.assertEqual(running.interface_index, 12)
+        self.assertEqual(running.bound_ipv4, "192.168.50.10")
+        self.assertEqual(running.endpoint_status, "healthy")
 
         stopped = self.controller.stop()
         self.assertFalse(stopped.running)
@@ -75,6 +117,14 @@ class ServiceControllerTests(unittest.TestCase):
         record = json.loads(log_path.read_text(encoding="utf-8").splitlines()[-1])
         self.assertEqual(record["stop_reason"], "manual_stop")
         self.assertNotIn("pairing_code", record)
+
+    def test_available_interfaces_returns_fresh_diagnostic_view(self) -> None:
+        interfaces = self.controller.available_interfaces()
+
+        self.assertEqual(len(interfaces), 1)
+        self.assertEqual(interfaces[0]["interface_index"], 12)
+        self.assertEqual(interfaces[0]["address"], "192.168.50.10")
+        self.assertEqual(interfaces[0]["role"], "lan_candidate")
 
     def test_rejects_second_start(self) -> None:
         self.controller.start(self.shared, self.received)
@@ -180,6 +230,86 @@ class ServiceControllerTests(unittest.TestCase):
             self.controller.start(self.root / "missing", self.received)
         with self.assertRaisesRegex(ServiceError, "上传上限"):
             self.controller.start(self.shared, self.received, 0)
+
+    def test_transient_endpoint_failure_is_confirmed_and_service_continues(self) -> None:
+        checker = _SequenceEndpointChecker(
+            [
+                EndpointObservation(False, category="Private"),
+                EndpointObservation(True, category="Private"),
+            ]
+        )
+        self.controller._endpoint_checker_factory = lambda _baseline: checker
+        self.controller._endpoint_check_interval = 0.1
+        self.controller._endpoint_confirmation_delay = 0.05
+        self.controller._category_check_interval = 10
+
+        self.controller.start(self.shared, self.received)
+        time.sleep(0.25)
+
+        state = self.controller.snapshot()
+        self.assertTrue(state.running)
+        self.assertEqual(state.endpoint_status, "healthy")
+        self.assertIn("瞬时异常已恢复", state.endpoint_detail)
+
+    def test_repeated_missing_endpoint_stops_with_network_changed(self) -> None:
+        checker = _SequenceEndpointChecker(
+            [EndpointObservation(False), EndpointObservation(False)]
+        )
+        self.controller._endpoint_checker_factory = lambda _baseline: checker
+        self.controller._endpoint_check_interval = 0.1
+        self.controller._endpoint_confirmation_delay = 0.05
+
+        self.controller.start(self.shared, self.received)
+        deadline = time.monotonic() + 1.5
+        while self.controller.snapshot().running and time.monotonic() < deadline:
+            time.sleep(0.02)
+
+        state = self.controller.snapshot()
+        self.assertFalse(state.running)
+        self.assertEqual(state.stop_reason, "network_changed")
+        self.assertEqual(state.endpoint_status, "changed")
+        self.assertIn("address_changed", state.endpoint_detail)
+        self.assertTrue(self.servers[-1].closed.is_set())
+
+    def test_explicit_public_category_stops_without_second_observation(self) -> None:
+        checker = _SequenceEndpointChecker(
+            [EndpointObservation(True, category="Public")]
+        )
+        self.controller._endpoint_checker_factory = lambda _baseline: checker
+        self.controller._endpoint_check_interval = 0.1
+        self.controller._category_check_interval = 0.1
+
+        self.controller.start(self.shared, self.received)
+        deadline = time.monotonic() + 1.5
+        while self.controller.snapshot().running and time.monotonic() < deadline:
+            time.sleep(0.02)
+
+        state = self.controller.snapshot()
+        self.assertFalse(state.running)
+        self.assertEqual(state.stop_reason, "network_changed")
+        self.assertIn("Public", state.endpoint_detail)
+
+    def test_deep_diagnostics_does_not_block_service_start(self) -> None:
+        release = threading.Event()
+
+        def blocking_diagnostics(_port: int, _program: str) -> dict[str, object]:
+            release.wait(1)
+            return _ready_diagnostics(_port, _program)
+
+        self.controller._diagnostics_factory = blocking_diagnostics
+        started = time.monotonic()
+        state = self.controller.start(self.shared, self.received)
+
+        self.assertLess(time.monotonic() - started, 0.5)
+        self.assertEqual(state.diagnostics["status"], "checking")
+        release.set()
+        deadline = time.monotonic() + 1
+        while (
+            self.controller.snapshot().diagnostics["status"] == "checking"
+            and time.monotonic() < deadline
+        ):
+            time.sleep(0.01)
+        self.assertEqual(self.controller.snapshot().diagnostics["status"], "ready")
 
 
 if __name__ == "__main__":

@@ -9,8 +9,8 @@ from pathlib import Path
 import re
 import secrets
 import threading
-from typing import Any, Iterable, Iterator
-from urllib.parse import quote
+from typing import Any, BinaryIO, Iterable, Iterator
+from urllib.parse import quote, unquote_to_bytes
 
 from bottle import Bottle, HTTPResponse, redirect, request, response, static_file
 
@@ -38,6 +38,10 @@ COOKIE_NAME = "landrop_trust"
 PAIRING_ATTEMPT_LIMIT = 5
 MULTIPART_OVERHEAD_ALLOWANCE = 2 * 1024 * 1024
 SMALL_FORM_LIMIT = 4096
+
+
+class UploadInterruptedError(StorageError):
+    """The client stopped sending before the declared request body ended."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -127,11 +131,15 @@ def create_application(config: WebConfig) -> tuple[Any, str]:
           <section>
             <h2>上传到电脑</h2>
             <p>单个文件上限：{html.escape(format_size(config.max_upload_bytes))}</p>
-            <form action="/upload" method="post" enctype="multipart/form-data">
+            <form id="uploadForm" action="/upload" method="post" enctype="multipart/form-data">
               <input type="hidden" name="csrf" value="{csrf_token}">
-              <input type="file" name="file" required>
-              <button type="submit">开始上传</button>
+              <input id="uploadFile" type="file" name="file" required>
+              <button id="uploadButton" type="submit">开始上传</button>
             </form>
+            <div id="uploadProgressBox" class="upload-progress" hidden>
+              <progress id="uploadProgress" value="0" max="1"></progress>
+              <p id="uploadStatus">准备上传……</p>
+            </div>
           </section>
           <section class="quiet">
             <form action="/unpair" method="post">
@@ -140,6 +148,76 @@ def create_application(config: WebConfig) -> tuple[Any, str]:
             </form>
           </section>
         </main>
+        <script>
+          const uploadForm = document.getElementById('uploadForm');
+          const uploadFile = document.getElementById('uploadFile');
+          const uploadButton = document.getElementById('uploadButton');
+          const uploadProgressBox = document.getElementById('uploadProgressBox');
+          const uploadProgress = document.getElementById('uploadProgress');
+          const uploadStatus = document.getElementById('uploadStatus');
+          const uploadCsrf = {json.dumps(csrf_token)};
+
+          function uploadMegabytes(bytes) {{
+            return (bytes / 1000000).toFixed(2);
+          }}
+
+          uploadForm.addEventListener('submit', event => {{
+            event.preventDefault();
+            const file = uploadFile.files[0];
+            if (!file) return;
+
+            uploadButton.disabled = true;
+            uploadFile.disabled = true;
+            uploadProgressBox.hidden = false;
+            uploadProgress.max = Math.max(file.size, 1);
+            uploadProgress.value = 0;
+            uploadStatus.textContent = '正在建立上传连接……';
+            const startedAt = performance.now();
+            const xhr = new XMLHttpRequest();
+            xhr.open('POST', '/upload/raw');
+            xhr.setRequestHeader('Content-Type', 'application/octet-stream');
+            xhr.setRequestHeader('X-LanDrop-CSRF', uploadCsrf);
+            xhr.setRequestHeader('X-LanDrop-Filename', encodeURIComponent(file.name));
+
+            xhr.upload.addEventListener('progress', progressEvent => {{
+              if (!progressEvent.lengthComputable) {{
+                uploadStatus.textContent = '正在上传，请保持页面打开……';
+                return;
+              }}
+              uploadProgress.max = Math.max(progressEvent.total, 1);
+              uploadProgress.value = progressEvent.loaded;
+              const elapsedSeconds = Math.max((performance.now() - startedAt) / 1000, 0.001);
+              const speed = progressEvent.loaded / elapsedSeconds / 1000000;
+              const percent = progressEvent.total
+                ? Math.min(100, progressEvent.loaded / progressEvent.total * 100)
+                : 0;
+              uploadStatus.textContent = `${{percent.toFixed(1)}}% · ${{uploadMegabytes(progressEvent.loaded)}} / ${{uploadMegabytes(progressEvent.total)}} MB · ${{speed.toFixed(2)}} MB/s`;
+            }});
+
+            xhr.addEventListener('load', () => {{
+              if (xhr.status >= 200 && xhr.status < 300) {{
+                document.open();
+                document.write(xhr.responseText);
+                document.close();
+                return;
+              }}
+              uploadButton.disabled = false;
+              uploadFile.disabled = false;
+              uploadStatus.textContent = `上传失败（HTTP ${{xhr.status}}），请返回首页重试。`;
+            }});
+            xhr.addEventListener('error', () => {{
+              uploadButton.disabled = false;
+              uploadFile.disabled = false;
+              uploadStatus.textContent = '上传连接中断；服务可能已停止或网络已经变化。';
+            }});
+            xhr.addEventListener('abort', () => {{
+              uploadButton.disabled = false;
+              uploadFile.disabled = false;
+              uploadStatus.textContent = '上传已取消。';
+            }});
+            xhr.send(file);
+          }});
+        </script>
         """
         return _page("LanDrop", body)
 
@@ -439,6 +517,85 @@ def create_application(config: WebConfig) -> tuple[Any, str]:
         )
         return _html_response(_page("上传成功", message), 201)
 
+    @app.post("/upload/raw")
+    def upload_raw() -> HTTPResponse:
+        """Receive one browser file without Bottle buffering multipart data first."""
+        expired = expired_response()
+        if expired is not None:
+            return expired
+        client = require_client()
+        if isinstance(client, HTTPResponse):
+            lifecycle.record_rejection("authentication")
+            return client
+
+        submitted_csrf = request.get_header("X-LanDrop-CSRF") or ""
+        if not secrets.compare_digest(submitted_csrf, csrf_token):
+            lifecycle.record_rejection("csrf")
+            return _html_response(_error_page(403, "请求校验失败，请返回首页重试。"), 403)
+
+        try:
+            raw_filename = _decode_upload_filename(
+                request.get_header("X-LanDrop-Filename") or ""
+            )
+        except InvalidFilenameError as exc:
+            lifecycle.record_rejection("invalid_filename")
+            return _html_response(_error_page(400, str(exc)), 400)
+
+        content_length = request.content_length
+        if content_length < 0:
+            lifecycle.record_rejection("missing_content_length")
+            return _html_response(_error_page(411, "上传请求必须提供 Content-Length。"), 411)
+        if content_length > config.max_upload_bytes:
+            lifecycle.record_rejection("size_limit")
+            return _html_response(
+                _error_page(413, f"上传请求超过 {format_size(config.max_upload_bytes)} 上限。"),
+                413,
+            )
+        try:
+            ensure_free_space(config.receive_directory, content_length)
+        except InsufficientSpaceError as exc:
+            lifecycle.record_rejection("insufficient_space")
+            return _html_response(_error_page(400, str(exc)), 400)
+
+        try:
+            transfer = lifecycle.begin_transfer("upload")
+        except SessionExpiredError:
+            return expired_response() or _html_response(_error_page(503, "会话已到期。"), 503)
+        try:
+            source = _ContentLengthReader(request.environ["wsgi.input"], content_length)
+            result = save_upload(
+                source,
+                raw_filename,
+                config.receive_directory,
+                config.max_upload_bytes,
+                progress=transfer.add_bytes,
+                check_cancelled=transfer.check_cancelled,
+            )
+        except UploadTooLargeError as exc:
+            transfer.fail("size_limit")
+            return _html_response(_error_page(413, str(exc)), 413)
+        except UploadInterruptedError as exc:
+            transfer.fail("client_disconnect")
+            return _html_response(_error_page(400, str(exc)), 400)
+        except (InvalidFilenameError, InsufficientSpaceError, StorageError) as exc:
+            transfer.fail("storage_error")
+            return _html_response(_error_page(400, str(exc)), 400)
+        except TransferCancelledError as exc:
+            transfer.fail(exc.reason)
+            return _html_response(_error_page(503, "传输会话已经结束。"), 503)
+        except Exception:
+            transfer.fail("server_error")
+            raise
+        transfer.complete()
+
+        rename_note = "（因同名已自动重命名）" if result.renamed else ""
+        message = (
+            f"<h1>上传成功</h1><p>已保存：<strong>{html.escape(result.filename)}</strong>"
+            f" {html.escape(format_size(result.size))}{rename_note}</p>"
+            '<p><a href="/">返回文件页面</a></p>'
+        )
+        return _html_response(_page("上传成功", message), 201)
+
     @app.post("/unpair")
     def unpair() -> HTTPResponse:
         expired = expired_response()
@@ -470,6 +627,41 @@ def create_application(config: WebConfig) -> tuple[Any, str]:
 def _valid_csrf(expected: str) -> bool:
     submitted = request.forms.getunicode("csrf") or ""
     return secrets.compare_digest(submitted, expected)
+
+
+def _decode_upload_filename(value: str) -> str:
+    if not value or len(value) > 4096:
+        raise InvalidFilenameError("文件名为空或过长。")
+    try:
+        encoded = value.encode("ascii")
+        return unquote_to_bytes(encoded.decode("ascii")).decode("utf-8", "strict")
+    except (UnicodeEncodeError, UnicodeDecodeError) as exc:
+        raise InvalidFilenameError("文件名编码无效。") from exc
+
+
+class _ContentLengthReader:
+    """Expose exactly one HTTP request body and detect an early disconnect."""
+
+    def __init__(self, source: BinaryIO, content_length: int) -> None:
+        self._source = source
+        self._remaining = content_length
+
+    def read(self, size: int = -1) -> bytes:
+        if self._remaining == 0:
+            return b""
+        requested = self._remaining if size < 0 else min(size, self._remaining)
+        try:
+            chunk = self._source.read(requested)
+        except OSError as exc:
+            raise UploadInterruptedError(
+                "上传连接提前中断，文件未完整接收。"
+            ) from exc
+        if not chunk:
+            raise UploadInterruptedError("上传连接提前中断，文件未完整接收。")
+        if len(chunk) > self._remaining:
+            chunk = chunk[: self._remaining]
+        self._remaining -= len(chunk)
+        return chunk
 
 
 def _pairing_page() -> str:
@@ -593,6 +785,10 @@ def _page(title: str, body: str) -> str:
     input, button {{ font: inherit; padding: 10px 12px; }}
     button {{ border: 0; border-radius: 8px; background: #1264d8; color: white; cursor: pointer; }}
     button.secondary {{ background: #596579; }}
+    button:disabled, input:disabled {{ opacity: .6; cursor: wait; }}
+    .upload-progress {{ width: 100%; margin-top: 12px; }}
+    .upload-progress progress {{ width: 100%; height: 16px; }}
+    .upload-progress p {{ margin: 6px 0 0; overflow-wrap: anywhere; }}
     .files {{ list-style: none; padding: 0; margin: 0; }}
     .files li {{ display: flex; justify-content: space-between; gap: 12px; padding: 10px 0; border-bottom: 1px solid #dfe5ed; }}
     .files a {{ overflow-wrap: anywhere; }}

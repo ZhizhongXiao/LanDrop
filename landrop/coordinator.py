@@ -17,6 +17,7 @@ AUTOMATIC_STOP_REASONS = frozenset(
         "deadline_transfers_completed",
         "grace_timeout",
         "system_resume",
+        "network_changed",
     }
 )
 
@@ -193,13 +194,20 @@ class ActionCoordinator:
             )
 
     def start_from_gui(
-        self, shared_directory: str, receive_directory: str, max_upload_mb: int
+        self,
+        shared_directory: str,
+        receive_directory: str,
+        max_upload_mb: int,
+        interface_selector: str | None = None,
     ) -> ServiceSnapshot:
         with self._lock:
             if self._exit_requested.is_set():
                 raise RuntimeError("应用正在退出。")
             state = self._controller.start(
-                shared_directory, receive_directory, max_upload_mb
+                shared_directory,
+                receive_directory,
+                max_upload_mb,
+                interface_selector,
             )
             self._clear_all_toasts()
             self._publish_state(state)

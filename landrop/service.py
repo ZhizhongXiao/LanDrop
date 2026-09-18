@@ -6,13 +6,21 @@ from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timezone
 import errno
 from pathlib import Path
+import sys
 import threading
-from time import perf_counter
+from time import monotonic, perf_counter
 from typing import Any, Callable
 
+from .diagnostics import inspect_system
 from .lifecycle import SessionExpiredError, SessionLifecycle
 from .events import SessionEventLog
-from .network import discover_interfaces, select_interface
+from .network import (
+    EndpointBaseline,
+    EndpointChecker,
+    discover_interfaces,
+    endpoint_baseline,
+    select_interface,
+)
 from .server import ServerGroup
 from .trust import CredentialStore
 from .web import WebConfig, create_application
@@ -33,7 +41,12 @@ class ServiceSnapshot:
     local_url: str = ""
     lan_url: str = ""
     interface: str = ""
+    interface_index: int = 0
+    bound_ipv4: str = ""
     network_category: str = ""
+    endpoint_status: str = "inactive"
+    endpoint_detail: str = ""
+    diagnostics: dict[str, object] | None = None
     pairing_code: str = ""
     session_id: str = ""
     deadline_revision: int = 0
@@ -48,6 +61,15 @@ class ServiceSnapshot:
 
     def to_dict(self) -> dict[str, object]:
         return asdict(self)
+
+
+@dataclass(frozen=True, slots=True)
+class _StopContext:
+    server: Any
+    worker: threading.Thread | None
+    watchdog: threading.Thread | None
+    network_monitor: threading.Thread | None
+    lifecycle: SessionLifecycle | None
 
 
 class ServiceController:
@@ -65,6 +87,11 @@ class ServiceController:
         duration_seconds: float = 300,
         grace_seconds: float = 60,
         lifecycle_factory: Callable[[], SessionLifecycle] | None = None,
+        endpoint_checker_factory: Callable[[EndpointBaseline], Any] = EndpointChecker,
+        diagnostics_factory: Callable[[int, str], dict[str, object]] = inspect_system,
+        endpoint_check_interval: float = 3.0,
+        category_check_interval: float = 15.0,
+        endpoint_confirmation_delay: float = 0.75,
         emit_performance_timings: bool = False,
     ) -> None:
         self._credentials = credentials
@@ -76,6 +103,15 @@ class ServiceController:
         self._duration_seconds = duration_seconds
         self._grace_seconds = grace_seconds
         self._lifecycle_factory = lifecycle_factory
+        self._endpoint_checker_factory = endpoint_checker_factory
+        self._diagnostics_factory = diagnostics_factory
+        self._endpoint_check_interval = max(0.1, float(endpoint_check_interval))
+        self._category_check_interval = max(
+            self._endpoint_check_interval, float(category_check_interval)
+        )
+        self._endpoint_confirmation_delay = max(
+            0.05, float(endpoint_confirmation_delay)
+        )
         self._emit_performance_timings = emit_performance_timings
         self._event_log = SessionEventLog(credentials.data_directory)
         self._lock = threading.RLock()
@@ -83,6 +119,9 @@ class ServiceController:
         self._worker: threading.Thread | None = None
         self._watchdog: threading.Thread | None = None
         self._watchdog_stop: threading.Event | None = None
+        self._network_monitor: threading.Thread | None = None
+        self._network_stop: threading.Event | None = None
+        self._diagnostics_generation = 0
         self._lifecycle: SessionLifecycle | None = None
         self._started_at = ""
         self._logged_sessions: set[str] = set()
@@ -93,12 +132,18 @@ class ServiceController:
             shared_directory="",
             receive_directory="",
             max_upload_mb=1000,
+            diagnostics=_empty_diagnostics(),
             statistics={},
         )
 
     def snapshot(self) -> ServiceSnapshot:
         with self._lock:
             return self._current_snapshot_locked()
+
+    def available_interfaces(self) -> list[dict[str, object]]:
+        """Return a fresh, read-only interface list for explicit GUI selection."""
+        interfaces = self._discover()
+        return [_interface_diagnostic(item) for item in interfaces]
 
     def start(
         self,
@@ -119,11 +164,13 @@ class ServiceController:
             directories_ready_at = perf_counter()
 
             try:
-                interface = self._select(self._discover(), interface_selector)
+                interfaces = self._discover()
+                interface = self._select(interfaces, interface_selector)
             except Exception as exc:
                 raise ServiceError(str(exc)) from exc
             network_ready_at = perf_counter()
 
+            server = None
             try:
                 lifecycle = (
                     self._lifecycle_factory()
@@ -143,11 +190,17 @@ class ServiceController:
                 application_ready_at = perf_counter()
                 server = self._server_factory(interface.address, self._port, application)
                 server_ready_at = perf_counter()
+                baseline = endpoint_baseline(interface)
+                endpoint_checker = self._endpoint_checker_factory(baseline)
                 lifecycle.activate()
                 lifecycle_activated_at = perf_counter()
             except OSError as exc:
+                if server is not None:
+                    server.close()
                 raise ServiceError(_format_bind_error(exc, interface.address, self._port)) from exc
             except Exception as exc:
+                if server is not None:
+                    server.close()
                 raise ServiceError(str(exc)) from exc
 
             self._server = server
@@ -163,7 +216,12 @@ class ServiceController:
                 local_url=f"http://127.0.0.1:{self._port}/",
                 lan_url=f"http://{interface.address}:{self._port}/",
                 interface=interface.alias,
+                interface_index=interface.interface_index,
+                bound_ipv4=interface.address,
                 network_category=interface.category,
+                endpoint_status="healthy",
+                endpoint_detail="启动时已确认 Private endpoint。",
+                diagnostics=_checking_diagnostics(interfaces),
                 pairing_code=pairing_code,
                 statistics={},
             )
@@ -187,6 +245,19 @@ class ServiceController:
             self._watchdog_stop = watchdog_stop
             watchdog.start()
             watchdog_started_at = perf_counter()
+            network_stop = threading.Event()
+            network_monitor = threading.Thread(
+                target=self._watch_network,
+                args=(server, lifecycle, endpoint_checker, network_stop),
+                name="LanDrop-Network-Monitor",
+                daemon=True,
+            )
+            self._network_monitor = network_monitor
+            self._network_stop = network_stop
+            network_monitor.start()
+            network_monitor_started_at = perf_counter()
+            self._start_diagnostics_locked(interfaces)
+            diagnostics_started_at = perf_counter()
             state = self._current_snapshot_locked()
             ready_at = perf_counter()
             if self._emit_performance_timings:
@@ -199,8 +270,10 @@ class ServiceController:
                     f"端口绑定 {server_ready_at - application_ready_at:.3f}s；"
                     f"会话激活 {lifecycle_activated_at - server_ready_at:.3f}s；"
                     f"服务线程 {worker_started_at - lifecycle_activated_at:.3f}s；"
-                    f"监控线程 {watchdog_started_at - worker_started_at:.3f}s；"
-                    f"状态快照 {ready_at - watchdog_started_at:.3f}s；"
+                    f"生命周期监控 {watchdog_started_at - worker_started_at:.3f}s；"
+                    f"网络监控 {network_monitor_started_at - watchdog_started_at:.3f}s；"
+                    f"诊断调度 {diagnostics_started_at - network_monitor_started_at:.3f}s；"
+                    f"状态快照 {ready_at - diagnostics_started_at:.3f}s；"
                     f"总计 {ready_at - started_at:.3f}s"
                 )
             return state
@@ -229,7 +302,7 @@ class ServiceController:
         *,
         expected_server: Any | None = None,
         expected_lifecycle: SessionLifecycle | None = None,
-    ) -> tuple[Any, threading.Thread | None, threading.Thread | None, SessionLifecycle | None] | None:
+    ) -> _StopContext | None:
         """Atomically mark the current service as stopping; caller holds ``_lock``."""
         server = self._server
         lifecycle = self._lifecycle
@@ -243,23 +316,35 @@ class ServiceController:
             lifecycle.stop(reason, reason)
         if self._watchdog_stop is not None:
             self._watchdog_stop.set()
+        if self._network_stop is not None:
+            self._network_stop.set()
         self._snapshot = _stopped_from(self._snapshot, "正在停止服务……", "stopping")
-        return server, self._worker, self._watchdog, lifecycle
+        return _StopContext(
+            server,
+            self._worker,
+            self._watchdog,
+            self._network_monitor,
+            lifecycle,
+        )
 
     def _finish_stop(
         self,
-        context: tuple[Any, threading.Thread | None, threading.Thread | None, SessionLifecycle | None],
+        context: _StopContext,
         reason: str,
         stop_started_at: float,
     ) -> ServiceSnapshot:
         """Release sockets and join threads after the atomic state transition."""
-        server, worker, watchdog, lifecycle = context
+        server = context.server
+        lifecycle = context.lifecycle
         server.close()
         server_closed_at = perf_counter()
-        if worker is not None and worker is not threading.current_thread():
-            worker.join(timeout=5)
-        if watchdog is not None and watchdog is not threading.current_thread():
-            watchdog.join(timeout=2)
+        for thread, timeout in (
+            (context.worker, 5),
+            (context.watchdog, 2),
+            (context.network_monitor, 2),
+        ):
+            if thread is not None and thread is not threading.current_thread():
+                thread.join(timeout=timeout)
         threads_joined_at = perf_counter()
 
         with self._lock:
@@ -271,6 +356,8 @@ class ServiceController:
                 self._worker = None
                 self._watchdog = None
                 self._watchdog_stop = None
+                self._network_monitor = None
+                self._network_stop = None
                 self._lifecycle = None
                 self._snapshot = _stopped_from(
                     self._snapshot,
@@ -294,6 +381,29 @@ class ServiceController:
                 self._lifecycle.reset_deadline(300)
             except SessionExpiredError as exc:
                 raise ServiceError(str(exc)) from exc
+            return self._current_snapshot_locked()
+
+    def refresh_diagnostics(self) -> ServiceSnapshot:
+        """Queue a full read-only diagnostic refresh without blocking the GUI."""
+        with self._lock:
+            if (self._snapshot.diagnostics or {}).get("status") == "checking":
+                return self._current_snapshot_locked()
+            self._diagnostics_generation += 1
+            generation = self._diagnostics_generation
+            current = dict(self._snapshot.diagnostics or _empty_diagnostics())
+            current["status"] = "checking"
+            current["message"] = "正在重新检测网络与防火墙……"
+            firewall = dict(current.get("firewall") or {})
+            firewall.update({"status": "checking", "message": "检测中"})
+            current["firewall"] = firewall
+            self._snapshot = replace(self._snapshot, diagnostics=current)
+            thread = threading.Thread(
+                target=self._run_diagnostics,
+                args=(generation, None, True),
+                name="LanDrop-Deep-Diagnostics",
+                daemon=True,
+            )
+            thread.start()
             return self._current_snapshot_locked()
 
     def apply_expected_action(
@@ -353,6 +463,10 @@ class ServiceController:
                     if self._watchdog_stop is not None:
                         self._watchdog_stop.set()
                     self._watchdog_stop = None
+                    self._network_monitor = None
+                    if self._network_stop is not None:
+                        self._network_stop.set()
+                    self._network_stop = None
                     self._lifecycle = None
                     self._snapshot = _stopped_from(
                         self._snapshot,
@@ -383,6 +497,140 @@ class ServiceController:
             with self._lock:
                 if self._server is not server or self._lifecycle is not lifecycle:
                     return
+
+    def _watch_network(
+        self,
+        server: Any,
+        lifecycle: SessionLifecycle,
+        checker: Any,
+        stop_check: threading.Event,
+    ) -> None:
+        # Startup discovery has just confirmed the category.  Do not launch a
+        # redundant PowerShell profile query while the initial background
+        # diagnostics are also warming up; address checks still start at the
+        # normal lightweight interval.
+        next_category_check = monotonic() + self._category_check_interval
+        while not stop_check.wait(self._endpoint_check_interval):
+            now = monotonic()
+            include_category = now >= next_category_check
+            observation = checker.observe(include_category=include_category)
+            if include_category:
+                next_category_check = now + self._category_check_interval
+
+            if observation.explicitly_public:
+                self._stop_for_network_change(
+                    server,
+                    lifecycle,
+                    "category_changed：当前 endpoint 已明确变为 Public",
+                )
+                return
+            if _endpoint_observation_matches(observation, include_category):
+                self._set_endpoint_status(server, "healthy", "运行期 endpoint 校验正常。")
+                continue
+
+            self._set_endpoint_status(server, "confirming", _observation_detail(observation))
+            if stop_check.wait(self._endpoint_confirmation_delay):
+                return
+            confirmed = checker.observe(include_category=include_category)
+            if confirmed.explicitly_public:
+                self._stop_for_network_change(
+                    server,
+                    lifecycle,
+                    "category_changed：当前 endpoint 已明确变为 Public",
+                )
+                return
+            if _endpoint_observation_matches(confirmed, include_category):
+                self._set_endpoint_status(server, "healthy", "瞬时异常已恢复，服务继续。")
+                continue
+            self._stop_for_network_change(
+                server,
+                lifecycle,
+                _observation_detail(confirmed),
+            )
+            return
+
+    def _set_endpoint_status(self, server: Any, status: str, detail: str) -> None:
+        with self._lock:
+            if self._server is server:
+                self._snapshot = replace(
+                    self._snapshot,
+                    endpoint_status=status,
+                    endpoint_detail=detail,
+                )
+
+    def _stop_for_network_change(
+        self,
+        server: Any,
+        lifecycle: SessionLifecycle,
+        detail: str,
+    ) -> None:
+        with self._lock:
+            if self._server is not server or self._lifecycle is not lifecycle:
+                return
+            self._snapshot = replace(
+                self._snapshot,
+                endpoint_status="changed",
+                endpoint_detail=detail,
+            )
+        print(f"[网络变化] {detail}")
+        self.stop(
+            "network_changed",
+            _expected_server=server,
+            _expected_lifecycle=lifecycle,
+        )
+
+    def _start_diagnostics_locked(self, interfaces: list[Any]) -> None:
+        self._diagnostics_generation += 1
+        generation = self._diagnostics_generation
+        thread = threading.Thread(
+            target=self._run_diagnostics,
+            args=(generation, interfaces, False),
+            name="LanDrop-Deep-Diagnostics",
+            daemon=True,
+        )
+        thread.start()
+
+    def _run_diagnostics(
+        self,
+        generation: int,
+        interfaces: list[Any] | None,
+        refresh_interfaces: bool,
+    ) -> None:
+        discovery_error = ""
+        if refresh_interfaces:
+            try:
+                interfaces = self._discover()
+            except Exception as exc:
+                interfaces = None
+                discovery_error = str(exc)
+        try:
+            result = self._diagnostics_factory(self._port, sys.executable)
+        except Exception as exc:
+            result = {
+                "status": "unknown",
+                "message": f"深度诊断失败：{exc}",
+                "network": {"status": "unknown", "adapters": []},
+                "firewall": {
+                    "status": "unknown",
+                    "level": "unknown",
+                    "message": f"防火墙诊断失败：{exc}",
+                    "evidence": [],
+                },
+            }
+        diagnostics = dict(result)
+        network = dict(diagnostics.get("network") or {})
+        if interfaces is not None:
+            network["interfaces"] = [_interface_diagnostic(item) for item in interfaces]
+        if discovery_error:
+            network["discovery_error"] = discovery_error
+            if network.get("status") != "ready":
+                network["message"] = discovery_error
+        diagnostics["network"] = network
+        diagnostics.setdefault("message", "网络与防火墙诊断已更新。")
+        with self._lock:
+            if generation != self._diagnostics_generation:
+                return
+            self._snapshot = replace(self._snapshot, diagnostics=diagnostics)
 
     def _current_snapshot_locked(self) -> ServiceSnapshot:
         if self._lifecycle is None or self._server is None:
@@ -465,6 +713,13 @@ def _stopped_from(
         shared_directory=current.shared_directory,
         receive_directory=current.receive_directory,
         max_upload_mb=current.max_upload_mb,
+        interface=current.interface,
+        interface_index=current.interface_index,
+        bound_ipv4=current.bound_ipv4,
+        network_category=current.network_category,
+        endpoint_status=current.endpoint_status,
+        endpoint_detail=current.endpoint_detail,
+        diagnostics=current.diagnostics,
         stop_reason=current.stop_reason,
         statistics=current.statistics or {},
     )
@@ -487,5 +742,71 @@ def _stop_message(reason: str) -> str:
         "deadline_transfers_completed": "现有传输已完成，端口已自动关闭。",
         "grace_timeout": "传输宽限时间已结束，端口已强制关闭。",
         "system_resume": "检测到电脑从睡眠恢复，会话已安全终止。",
+        "network_changed": "网络环境已变化，传输服务已安全停止，请重新开启。",
     }
     return messages.get(reason, "服务已停止，端口已关闭。")
+
+
+def _endpoint_observation_matches(observation: Any, include_category: bool) -> bool:
+    if observation.error or observation.address_present is not True:
+        return False
+    return not include_category or observation.category_private
+
+
+def _observation_detail(observation: Any) -> str:
+    if observation.error:
+        return f"monitor_error：{observation.error}"
+    if observation.address_present is not True:
+        return "address_changed：启动时绑定的 InterfaceIndex + IPv4 已不存在"
+    if observation.category and not observation.category_private:
+        return f"category_changed：当前网络类别为 {observation.category}"
+    return "endpoint_changed：当前 endpoint 与启动基线不一致"
+
+
+def _interface_diagnostic(interface: Any) -> dict[str, object]:
+    converter = getattr(interface, "to_diagnostic_dict", None)
+    if callable(converter):
+        return converter()
+    return {
+        "alias": str(getattr(interface, "alias", "")),
+        "interface_index": int(getattr(interface, "interface_index", 0)),
+        "address": str(getattr(interface, "address", "")),
+        "category": str(getattr(interface, "category", "Unknown")),
+        "connectivity": str(getattr(interface, "connectivity", "Unknown")),
+        "has_gateway": getattr(interface, "has_gateway", None),
+        "description": str(getattr(interface, "description", "")),
+        "role": "lan_candidate",
+    }
+
+
+def _empty_diagnostics() -> dict[str, object]:
+    return {
+        "status": "idle",
+        "message": "尚未执行深度诊断。",
+        "network": {"status": "idle", "interfaces": [], "adapters": []},
+        "firewall": {
+            "status": "idle",
+            "level": "unknown",
+            "message": "尚未检测。",
+            "evidence": [],
+        },
+    }
+
+
+def _checking_diagnostics(interfaces: list[Any]) -> dict[str, object]:
+    return {
+        "status": "checking",
+        "message": "服务已启动，正在异步读取网络与防火墙详细信息……",
+        "network": {
+            "status": "checking",
+            "message": "正在读取详细信息。",
+            "interfaces": [_interface_diagnostic(item) for item in interfaces],
+            "adapters": [],
+        },
+        "firewall": {
+            "status": "checking",
+            "level": "unknown",
+            "message": "检测中",
+            "evidence": [],
+        },
+    }
