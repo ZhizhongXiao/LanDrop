@@ -67,7 +67,7 @@ def create_application(config: WebConfig) -> tuple[Any, str]:
             _page(
                 "会话已到期",
                 "<main class=\"narrow\"><h1>本次传输会话已到期</h1>"
-                "<p>请在电脑上重新启动 LanDrop 服务。</p></main>",
+                "<p>请在服务机上重新启动 LanDrop 服务。</p></main>",
             ),
             503,
         )
@@ -122,14 +122,14 @@ def create_application(config: WebConfig) -> tuple[Any, str]:
             )
         listing = "".join(rows) or "<li><em>共享目录中暂无文件</em></li>"
         body = f"""
-        <header><div><h1>LanDrop</h1><p>可信客户端：{html.escape(client.label)}</p></div></header>
+        <header><div><h1>LanDrop</h1><p>可信客户机浏览器：{html.escape(client.label)}</p></div></header>
         <main>
           <section>
-            <h2>从电脑下载</h2>
+            <h2>从服务机下载</h2>
             <ul class="files">{listing}</ul>
           </section>
           <section>
-            <h2>上传到电脑</h2>
+            <h2>上传到服务机</h2>
             <p>单个文件上限：{html.escape(format_size(config.max_upload_bytes))}</p>
             <form id="uploadForm" action="/upload" method="post" enctype="multipart/form-data">
               <input type="hidden" name="csrf" value="{csrf_token}">
@@ -379,7 +379,7 @@ def create_application(config: WebConfig) -> tuple[Any, str]:
                 _page(
                     "配对失败",
                     "<h1>配对失败</h1><p>配对码不正确或已被其他设备使用。"
-                    "请查看电脑上当前显示的配对码。</p><p><a href=\"/\">返回</a></p>",
+                    "请查看服务机上当前显示的配对码。</p><p><a href=\"/\">返回</a></p>",
                 ),
                 403,
             )
@@ -668,7 +668,7 @@ def _pairing_page() -> str:
     body = """
     <main class="narrow">
       <h1>连接 LanDrop</h1>
-      <p>请在电脑的 LanDrop 窗口或控制台中查看当前 8 位配对码。配对成功后该码会立即更新。</p>
+      <p>请在服务机的 LanDrop 窗口或控制台中查看当前 8 位配对码。配对成功后该码会立即更新。</p>
       <form action="/pair" method="post">
         <label>配对码 <input id="pairingCode" name="code" inputmode="numeric"
           autocomplete="one-time-code" pattern="[0-9]{8}" required></label>

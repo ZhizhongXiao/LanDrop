@@ -106,12 +106,14 @@ class ServiceControllerTests(unittest.TestCase):
         self.assertEqual(running.max_upload_mb, 32)
         self.assertEqual(running.interface_index, 12)
         self.assertEqual(running.bound_ipv4, "192.168.50.10")
+        self.assertEqual(running.network_name, "Test adapter")
         self.assertEqual(running.endpoint_status, "healthy")
 
         stopped = self.controller.stop()
         self.assertFalse(stopped.running)
         self.assertEqual(stopped.phase, "stopped")
         self.assertEqual(stopped.lan_url, "")
+        self.assertEqual(stopped.network_name, "Test adapter")
         self.assertTrue(self.servers[0].closed.is_set())
         log_path = self.root / "data" / "logs" / "sessions.jsonl"
         record = json.loads(log_path.read_text(encoding="utf-8").splitlines()[-1])

@@ -173,7 +173,7 @@ class DesktopApi:
             result["revoked"] = revoked
             if not revoked and result.get("ok"):
                 result["ok"] = False
-                result["error"] = "该可信设备已不存在。"
+                result["error"] = "该可信客户机已不存在。"
             return result
         except RuntimeError as exc:
             return {"ok": False, "error": str(exc), "clients": []}
@@ -355,7 +355,7 @@ DESKTOP_HTML = r"""<!doctype html>
 <body>
 <main>
   <header>
-    <div><h1>LanDrop</h1><p class="subtitle">可信局域网文件传输</p></div>
+    <div><h1>LanDrop</h1><p class="subtitle">服务机 ↔ 客户机 · 可信局域网传输</p></div>
     <span id="badge" class="badge">已停止</span>
   </header>
 
@@ -369,24 +369,24 @@ DESKTOP_HTML = r"""<!doctype html>
 
   <section>
     <h2>文件目录</h2>
-    <label for="shared">手机下载目录</label>
+    <label for="shared">共享目录（客户机下载）</label>
     <div class="path-row">
       <input id="shared" autocomplete="off">
       <button class="secondary chooser" data-target="shared">选择…</button>
     </div>
-    <label for="received">手机上传接收目录</label>
+    <label for="received">接收目录（客户机上传）</label>
     <div class="path-row">
       <input id="received" autocomplete="off">
       <button class="secondary chooser" data-target="received">选择…</button>
     </div>
     <label for="limit">单文件上传上限（MB）</label>
     <input id="limit" type="number" min="1" max="10000" value="1000">
-    <label for="interfaceSelector">服务网络接口</label>
+    <label for="interfaceSelector">监听网络</label>
     <div class="path-row">
       <select id="interfaceSelector">
-        <option value="">自动选择（仅一个 Private LAN 时）</option>
+        <option value="">自动选择（仅一个可用 Private 网络）</option>
       </select>
-      <button id="refreshInterfaces" class="secondary">刷新接口</button>
+      <button id="refreshInterfaces" class="secondary">刷新网络</button>
     </div>
     <div class="actions">
       <button id="start" class="primary">启动服务</button>
@@ -400,11 +400,11 @@ DESKTOP_HTML = r"""<!doctype html>
     <dl class="status-grid">
       <dt>状态</dt><dd id="message">服务未启动</dd>
       <dt>剩余时间</dt><dd id="countdown" class="countdown">—</dd>
-      <dt>手机地址</dt><dd id="lanUrl">—</dd>
-      <dt>本机地址</dt><dd id="localUrl">—</dd>
-      <dt>网络接口</dt><dd id="network">—</dd>
+      <dt>客户机访问</dt><dd id="lanUrl">—</dd>
+      <dt>服务机本地</dt><dd id="localUrl">—</dd>
+      <dt>监听网络</dt><dd id="network">—</dd>
       <dt>本次配对码</dt><dd id="pairing" class="code">—</dd>
-      <dt>已配对设备</dt><dd id="paired">0</dd>
+      <dt>已配对客户机</dt><dd id="paired">0</dd>
       <dt>活动请求流</dt><dd id="active">0</dd>
       <dt>文件任务</dt><dd id="statistics">—</dd>
       <dt>下载请求流</dt><dd id="streamStatistics">—</dd>
@@ -413,13 +413,13 @@ DESKTOP_HTML = r"""<!doctype html>
       <dt>拒绝分类</dt><dd id="rejectionReasons">—</dd>
     </dl>
     <div class="actions">
-      <button id="open" class="secondary" disabled>在浏览器中打开</button>
+      <button id="open" class="secondary" disabled>在服务机浏览器中打开</button>
       <button id="resetDeadline" class="secondary" disabled>重置为 5 分钟</button>
     </div>
   </section>
 
   <section>
-    <h2>可信设备</h2>
+    <h2>可信客户机</h2>
     <div id="clients" class="clients"><span class="subtitle">正在读取…</span></div>
     <div class="actions">
       <button id="refreshClients" class="secondary">刷新列表</button>
@@ -428,28 +428,30 @@ DESKTOP_HTML = r"""<!doctype html>
   </section>
 
   <section class="security">
-    服务只会在 Windows 确认为 Private 的 LAN 接口上启动，并同时监听本机回环地址。
+    服务机是运行 LanDrop 的电脑；客户机是通过浏览器连接的手机或另一台电脑。
+    服务仅在 Windows Private LAN 上启动；127.0.0.1 只供服务机本地访问。
     关闭窗口会隐藏到系统托盘；请在托盘菜单中选择“退出 LanDrop”以停止服务并关闭端口。窗口不承担文件传输。
   </section>
   </div>
 
   <div id="infoPage" class="page">
     <section>
-      <h2>当前网络基线</h2>
+      <h2>当前服务机网络基线</h2>
       <dl class="status-grid">
-        <dt>Endpoint</dt><dd id="endpointSummary">—</dd>
-        <dt>运行期校验</dt><dd id="endpointHealth">—</dd>
+        <dt>服务端绑定基线</dt><dd id="endpointSummary">—</dd>
+        <dt>服务端网络校验</dt><dd id="endpointHealth">—</dd>
         <dt>诊断状态</dt><dd id="diagnosticStatus">尚未检测</dd>
-        <dt>监听地址</dt><dd id="listenSummary">—</dd>
+        <dt>服务端监听地址</dt><dd id="listenSummary">—</dd>
         <dt>传输摘要</dt><dd id="transferSummary">—</dd>
       </dl>
     </section>
     <section>
-      <h2>可见网络接口</h2>
+      <h2>服务机 IPv4 接口</h2>
       <div id="interfaceList" class="diagnostic-list"><span class="subtitle">尚未检测。</span></div>
+      <p class="subtitle">127.0.0.1 是服务机内部回环地址，只供服务机本地访问，不是 LAN 候选。无 IPv4 的断开适配器不会进入此列表。</p>
     </section>
     <section>
-      <h2>网络详细信息</h2>
+      <h2>服务机网络详细信息</h2>
       <div id="adapterDetails" class="diagnostic-list"><span class="subtitle">正在等待异步诊断。</span></div>
     </section>
     <section>
@@ -509,7 +511,11 @@ DESKTOP_HTML = r"""<!doctype html>
     $('message').textContent = state.message || '—';
     $('lanUrl').textContent = state.lan_url || '—';
     $('localUrl').textContent = state.local_url || '—';
-    $('network').textContent = state.interface ? `${state.interface}（${state.network_category}）` : '—';
+    const networkName = state.network_name && state.network_name !== state.interface
+      ? ` · ${state.network_name}` : '';
+    $('network').textContent = state.interface
+      ? `${state.interface}${networkName}（${state.network_category || '类别未知'}）`
+      : '—';
     $('pairing').textContent = String(state.pairing_code || '').replace(/[^0-9]/g, '') || '—';
     const milliseconds = state.phase === 'grace'
       ? (state.grace_remaining_milliseconds ?? Number(state.grace_remaining_seconds || 0) * 1000)
@@ -586,16 +592,18 @@ DESKTOP_HTML = r"""<!doctype html>
   }
 
   function renderDiagnostics(state, stats) {
+    const endpointNetworkName = state.network_name && state.network_name !== state.interface
+      ? ` · ${state.network_name}` : '';
     const endpoint = state.interface_index
-      ? `#${state.interface_index} · ${state.bound_ipv4 || '地址未知'} · ${state.network_category || '类别未知'} · ${state.interface || '未命名接口'}`
-      : '尚未建立服务 endpoint';
+      ? `#${state.interface_index} · ${state.bound_ipv4 || '地址未知'} · ${state.network_category || '类别未知'} · ${state.interface || '未命名接口'}${endpointNetworkName}`
+      : '尚未建立服务端绑定基线';
     $('endpointSummary').textContent = endpoint;
     const endpointLabels = {
       healthy: '正常', confirming: '正在二次确认', changed: '已变化', inactive: '未启用'
     };
     $('endpointHealth').textContent = `${endpointLabels[state.endpoint_status] || state.endpoint_status || '未启用'}${state.endpoint_detail ? `；${state.endpoint_detail}` : ''}`;
     $('listenSummary').textContent = state.running
-      ? `${state.lan_url || '—'}；${state.local_url || '—'}`
+      ? `客户机访问：${state.lan_url || '—'}；服务机本地：${state.local_url || '—'}`
       : '端口未监听';
     $('transferSummary').textContent = `${Number(stats.transferred_mb || 0).toFixed(2)} MB；平均 ${Number(stats.average_mb_s || 0).toFixed(2)} MB/s；活动请求流 ${state.active_transfers || 0}`;
 
@@ -607,8 +615,8 @@ DESKTOP_HTML = r"""<!doctype html>
       $('interfaceList'),
       network.interfaces || [],
       item => ({
-        title: `${item.alias || '未命名接口'} · ${item.address || '无 IPv4'}`,
-        meta: `InterfaceIndex ${item.interface_index || '—'} · ${item.category || 'Unknown'} · ${item.connectivity || 'Unknown'} · ${item.role === 'excluded' ? '不作为 LAN 候选' : 'LAN 候选'}`
+        title: `${item.alias || '未命名接口'}${item.description && item.description !== item.alias ? ` · ${item.description}` : ''} · ${item.address || '无 IPv4'}`,
+        meta: `InterfaceIndex ${item.interface_index || '—'} · ${item.category || 'Unknown'} · ${item.connectivity || 'Unknown'} · ${item.address === '127.0.0.1' ? '服务机回环，仅供本地访问' : (item.role === 'excluded' ? '不作为 LAN 候选' : 'LAN 候选')}`
       }),
       network.discovery_error || '未检测到接口。'
     );
@@ -666,7 +674,7 @@ DESKTOP_HTML = r"""<!doctype html>
     root.replaceChildren();
     if (!clients.length) {
       const empty = document.createElement('span');
-      empty.className = 'subtitle'; empty.textContent = '当前没有可信设备。'; root.appendChild(empty);
+      empty.className = 'subtitle'; empty.textContent = '当前没有可信客户机。'; root.appendChild(empty);
       return;
     }
     for (const client of clients) {
@@ -689,7 +697,7 @@ DESKTOP_HTML = r"""<!doctype html>
         ['浏览器', client.browser || '未知'],
         ['浏览器内核', client.browser_engine || '未知'],
         ['配对时间', created],
-        ['客户端标识', client.client_id]
+        ['客户端标识（浏览器）', client.client_id]
       ];
       for (const [label, value] of detailRows) {
         const key = document.createElement('span'); key.className = 'client-detail-label'; key.textContent = label;
@@ -699,7 +707,7 @@ DESKTOP_HTML = r"""<!doctype html>
       details.append(summary, grid);
       const revoke = document.createElement('button'); revoke.className = 'secondary'; revoke.textContent = '撤销信任';
       revoke.addEventListener('click', async () => {
-        if (!confirm(`确定撤销设备“${id.textContent}”的信任吗？`)) return;
+        if (!confirm(`确定撤销客户机“${id.textContent}”的信任吗？`)) return;
         const result = await window.pywebview.api.revoke_trusted_client(client.client_id);
         if (!result.ok) showError(result.error); else renderClients(result.clients);
       });
@@ -719,14 +727,17 @@ DESKTOP_HTML = r"""<!doctype html>
     if (!result.ok) { showError(result.error); return; }
     selector.replaceChildren();
     const automatic = document.createElement('option');
-    automatic.value = ''; automatic.textContent = '自动选择（仅一个 Private LAN 时）';
+    automatic.value = ''; automatic.textContent = '自动选择（仅一个可用 Private 网络）';
     selector.appendChild(automatic);
     for (const item of result.interfaces || []) {
+      if (item.role === 'excluded') continue;
       const option = document.createElement('option');
       option.value = item.address || '';
-      const usable = item.role !== 'excluded' && String(item.category || '').toLowerCase() === 'private';
+      const usable = String(item.category || '').toLowerCase() === 'private';
       option.disabled = !usable;
-      option.textContent = `${item.alias || '未命名接口'} · ${item.address || '无 IPv4'} · ${item.category || 'Unknown'}${usable ? '' : ' · 不可选'}`;
+      const alias = item.alias || '未命名接口';
+      const profileName = item.description && item.description !== alias ? ` · ${item.description}` : '';
+      option.textContent = `${alias}${profileName} · ${item.address || '无 IPv4'} · ${item.category || '类别未知'}${usable ? '' : ' · 不可选'}`;
       selector.appendChild(option);
     }
     if ([...selector.options].some(option => option.value === previous && !option.disabled)) {
@@ -818,7 +829,7 @@ DESKTOP_HTML = r"""<!doctype html>
   $('refreshClients').addEventListener('click', refreshClients);
   $('refreshInterfaces').addEventListener('click', refreshInterfaces);
   $('revokeAll').addEventListener('click', async () => {
-    if (!confirm('确定撤销全部可信设备吗？所有浏览器下次访问都需要重新配对。')) return;
+    if (!confirm('确定撤销全部可信客户机吗？所有客户机浏览器下次访问都需要重新配对。')) return;
     const result = await window.pywebview.api.revoke_all_trusted_clients();
     if (!result.ok) showError(result.error); else renderClients(result.clients);
   });

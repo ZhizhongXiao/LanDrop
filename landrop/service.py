@@ -41,6 +41,7 @@ class ServiceSnapshot:
     local_url: str = ""
     lan_url: str = ""
     interface: str = ""
+    network_name: str = ""
     interface_index: int = 0
     bound_ipv4: str = ""
     network_category: str = ""
@@ -216,6 +217,7 @@ class ServiceController:
                 local_url=f"http://127.0.0.1:{self._port}/",
                 lan_url=f"http://{interface.address}:{self._port}/",
                 interface=interface.alias,
+                network_name=interface.description,
                 interface_index=interface.interface_index,
                 bound_ipv4=interface.address,
                 network_category=interface.category,
@@ -714,6 +716,7 @@ def _stopped_from(
         receive_directory=current.receive_directory,
         max_upload_mb=current.max_upload_mb,
         interface=current.interface,
+        network_name=current.network_name,
         interface_index=current.interface_index,
         bound_ipv4=current.bound_ipv4,
         network_category=current.network_category,
@@ -741,7 +744,7 @@ def _stop_message(reason: str) -> str:
         "deadline_no_active": "5 分钟会话已到期，端口已自动关闭。",
         "deadline_transfers_completed": "现有传输已完成，端口已自动关闭。",
         "grace_timeout": "传输宽限时间已结束，端口已强制关闭。",
-        "system_resume": "检测到电脑从睡眠恢复，会话已安全终止。",
+        "system_resume": "检测到服务机从睡眠恢复，会话已安全终止。",
         "network_changed": "网络环境已变化，传输服务已安全停止，请重新开启。",
     }
     return messages.get(reason, "服务已停止，端口已关闭。")

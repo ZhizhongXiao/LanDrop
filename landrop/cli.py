@@ -126,11 +126,16 @@ def main(argv: list[str] | None = None) -> int:
     print(f"下载目录：{shared_directory}")
     print(f"接收目录：{receive_directory}")
     print(f"上传上限：{args.max_upload_mb} MB")
-    print(f"电脑本机：{state.local_url}")
-    print(f"手机访问：{state.lan_url}")
-    print(f"网络接口：{state.interface}（{state.network_category}）")
+    print(f"服务机本地访问：{state.local_url}")
+    print(f"客户机访问：{state.lan_url}")
+    network_name = (
+        f" · {state.network_name}"
+        if state.network_name and state.network_name != state.interface
+        else ""
+    )
+    print(f"服务机监听网络：{state.interface}{network_name}（{state.network_category}）")
     print(f"本次配对码：{state.pairing_code}")
-    print("配对码单次有效；新设备配对后控制台会显示新码。")
+    print("配对码单次有效；新客户机配对后控制台会显示新码。")
     print(f"会话时长：{args.session_seconds} 秒；传输宽限：{args.grace_seconds} 秒")
     print("按 Ctrl+C 停止服务。")
 
