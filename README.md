@@ -9,7 +9,8 @@ LanDrop 是一个面向 Windows 11 与 Android 浏览器的轻量局域网文件
 - 第三阶段 pywebview 桌面控制窗口已经实现，并通过人工验收。
 - 第四阶段 5 分钟生命周期、倒计时重置、传输宽限、可信设备管理和会话统计已通过开发验收。
 - 第五阶段托盘、Windows 通知、旧通知隔离和统一退出已经实现，并通过 Windows 11 实机验收。
-- 当前源码版本：`0.5.0`；自动化测试共 43 项。
+- 第六阶段网络与防火墙诊断、冻结 endpoint 监测、PC↔PC Ethernet、分层性能基准和原始流上传已经通过人工与自动化验收。
+- 当前发布基线为 `0.6.0`，共有 65 项自动化测试；下一阶段为便携打包与稳定性测试。
 - 公司等 `Public` 网络仍会拒绝启动。
 - 二维码尚未实现；托盘由 `pystray` 提供，Windows 通知由 `Windows-Toasts` 提供。
 
@@ -25,6 +26,7 @@ LanDrop 是一个面向 Windows 11 与 Android 浏览器的轻量局域网文件
 - 8 位临时配对码和失败次数限制；
 - 浏览器保存高熵凭据，电脑只保存 SHA-256 哈希；
 - HttpOnly、SameSite Cookie 与上传 CSRF 校验；
+- 浏览器默认使用原始请求体进行真正的网络流式上传并显示实时进度；multipart 接口仅作为无脚本兼容回退；
 - 浏览器自行取消信任，以及 PC 端列出和撤销信任。
 
 第三阶段桌面窗口基础包含：
@@ -58,6 +60,23 @@ LanDrop 是一个面向 Windows 11 与 Android 浏览器的轻量局域网文件
 - 应用启动、状态变更与退出时清理失效通知；托盘不可用时关闭窗口会安全退出，不会留下无法找回的后台进程；
 - 托盘“退出 LanDrop”统一停止服务、释放端口、清理通知并记录 `app_exit`。
 
+
+第六阶段当前实现（已验收）：
+
+- 启动服务时完整检测网络并冻结本次进程内 session 的 `InterfaceIndex + IPv4 + NetworkCategory` endpoint 基线；接口别名只用于显示，重启服务后重新检测。
+- 运行中使用独立轻量 endpoint checker，优先复用原生 IP Helper 地址表，不直接复用会启动 PowerShell 的完整 `discover_interfaces()`，也不重新选网或扫描防火墙。
+- 当前 endpoint 仍有效时，即使新增或改变其他 WLAN/Ethernet/TUN 也不影响服务；查询失败或接口/地址疑似短暂缺失时二次确认，明确转为 Public 时立即以 `network_changed` 停止，不做热迁移。
+- DNS、SSID、默认网关和 route metric 仅作为诊断信息，不直接停服。
+- 防火墙采用异步或短超时的分层诊断，不进入同步启动硬路径；“检测中”“无法确定”和“未发现明确 allow”都不阻止已经确认的 Private endpoint 启动。
+- 网络变化自动停服后先刷新托盘，再发送无按钮通知；点击正文只打开现有 GUI，不重启或迁移服务。
+- GUI 方向为“主控 / 信息 / 设置”三页；设置页只提供诊断、重新检测/重试及 Windows 网络、防火墙、代理等官方入口。
+- 主控页提供可刷新接口选择；只有一个 Private LAN 时可自动选择，WLAN 与 Ethernet 同时为 Private 时由用户明确选择具体 IPv4，启动阶段仍会重新发现并验证，绝不按旧列表静默绑定。
+- TUN/VPN 中性展示，存在本身不视为异常。
+- Ethernet 正式纳入测试，包括两台 Windows PC 使用 RFC1918 静态 IPv4 且由用户确认 Private 的网线直连，以及 WLAN + Ethernet 共存；无 WAN 路由器 + DHCP + Ethernet 降为可选硬件兼容性补测。Public 仍只做拒绝启动测试，不使用 link-local 地址。
+- 性能测试采用 iperf3 → 裸 Python HTTP → LanDrop+curl → 浏览器 → 原始流上传的分层基准；直连实测下载 `86.25 MB/s`、上传 GUI 端到端约 `105 MB/s`，均符合各自方向的 TCP 基线。SMB 仅作为可选 Private LAN 横向参照，不作为功能验收门槛。
+- 运行期原生 IPv4 endpoint 检查在开发机上 500 次测量平均约 `2.68 ms/次`，当前冻结为每 3 秒检查地址、每 15 秒低频复核 NetworkCategory；疑似异常在约 0.75 秒后二次确认。
+- 网络详细信息与防火墙证据由后台并行执行，统一设 10 秒硬超时；权限不足、查询卡顿或超时时只显示“无法确定”，不会阻塞端口启动。
+
 ## 产品边界
 
 - 首先支持 Windows 11；手机端使用浏览器。
@@ -76,6 +95,7 @@ LanDrop/
 ├─ landrop/
 │  ├─ cli.py            # 参数、状态输出与生命周期
 │  ├─ coordinator.py    # GUI、托盘和 Toast 的统一动作协调
+│  ├─ diagnostics.py    # 异步、限时、只读的网络与防火墙深度诊断
 │  ├─ gui.py            # 桌面控制窗口与 JS API
 │  ├─ network.py        # Windows 网络检测和安全选网
 │  ├─ notifications.py  # Windows Toast 适配器
