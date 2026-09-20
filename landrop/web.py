@@ -84,6 +84,58 @@ def create_application(config: WebConfig) -> tuple[Any, str]:
             )
         return client
 
+    def complete_new_client_pairing(
+        kind: str,
+        submitted: str,
+        device_name: str,
+        remote: str,
+    ) -> tuple[str, str]:
+        """Commit both pairing methods through one serialized transaction."""
+        with pairing_lock:
+            attempts = failed_pairing.get(remote, 0)
+            if kind == "code" and attempts >= PAIRING_ATTEMPT_LIMIT:
+                return "limited", ""
+
+            pairing = lifecycle.prepare_pairing(kind, submitted)
+            if pairing is None:
+                if kind == "code":
+                    failed_pairing[remote] = attempts + 1
+                return "invalid", ""
+
+            user_agent = request.get_header("User-Agent") or "浏览器"
+            client_hints = {
+                "brands": request.get_header("Sec-CH-UA") or "",
+                "mobile": request.get_header("Sec-CH-UA-Mobile") or "",
+                "platform": request.get_header("Sec-CH-UA-Platform") or "",
+                "model": request.get_header("Sec-CH-UA-Model") or "",
+            }
+            prepared_credential = config.credentials.prepare(
+                user_agent,
+                device_name,
+                client_hints,
+            )
+            try:
+                with config.credentials.persist_prepared(prepared_credential) as persistence:
+                    if not lifecycle.commit_pairing(pairing):
+                        return "unavailable", ""
+                    persistence.commit()
+            except (OSError, RuntimeError):
+                return "storage_error", ""
+
+            failed_pairing.pop(remote, None)
+            return "success", prepared_credential.credential
+
+    def trusted_cookie_response(credential: str, *, redirect_to: str = "/") -> HTTPResponse:
+        response.set_cookie(
+            COOKIE_NAME,
+            credential,
+            path="/",
+            max_age=365 * 24 * 60 * 60,
+            httponly=True,
+            samesite="Strict",
+        )
+        return redirect(redirect_to, code=303)
+
     @app.hook("after_request")
     def security_headers() -> None:
         response.set_header("X-Content-Type-Options", "nosniff")
@@ -113,32 +165,43 @@ def create_application(config: WebConfig) -> tuple[Any, str]:
         rows = []
         for item in list_shared_files(config.shared_directory):
             url = "/prepare-download/" + quote(item.relative_path, safe="/")
+            ticket_url = "/start-download/" + quote(item.relative_path, safe="/")
             rows.append(
-                "<li><a href=\"{}\">{}</a><span>{}</span></li>".format(
+                "<li class=\"file-row\"><label class=\"file-choice\">"
+                "<input class=\"download-choice\" type=\"checkbox\" data-ticket-url=\"{}\">"
+                "<a class=\"file-link\" href=\"{}\" data-ticket-url=\"{}\">{}</a>"
+                "</label><span class=\"file-size\">{}</span></li>".format(
+                    html.escape(ticket_url, quote=True),
                     html.escape(url, quote=True),
+                    html.escape(ticket_url, quote=True),
                     html.escape(item.relative_path),
                     html.escape(format_size(item.size)),
                 )
             )
-        listing = "".join(rows) or "<li><em>共享目录中暂无文件</em></li>"
+        listing = "".join(rows) or '<li class="empty"><em>当前没有可供下载的文件</em></li>'
         body = f"""
         <header><div><h1>LanDrop</h1><p>可信客户机浏览器：{html.escape(client.label)}</p></div></header>
         <main>
           <section>
             <h2>从服务机下载</h2>
             <ul class="files">{listing}</ul>
+            <p id="downloadStatus" class="transfer-status" aria-live="polite">选择文件名可直接下载，也可勾选多个文件。</p>
+            <iframe name="downloadTarget" title="下载目标" hidden></iframe>
           </section>
           <section>
             <h2>上传到服务机</h2>
             <p>单个文件上限：{html.escape(format_size(config.max_upload_bytes))}</p>
             <form id="uploadForm" action="/upload" method="post" enctype="multipart/form-data">
               <input type="hidden" name="csrf" value="{csrf_token}">
-              <input id="uploadFile" type="file" name="file" required>
-              <button id="uploadButton" type="submit">开始上传</button>
+              <input id="uploadFile" type="file" name="file" multiple required>
+              <button id="uploadButton" type="submit">开始串行上传</button>
+              <button id="uploadCancel" class="secondary" type="button" hidden>停止整批</button>
+              <button id="uploadRetry" class="secondary" type="button" hidden>重试失败项</button>
             </form>
             <div id="uploadProgressBox" class="upload-progress" hidden>
               <progress id="uploadProgress" value="0" max="1"></progress>
               <p id="uploadStatus">准备上传……</p>
+              <ul id="uploadResults" class="batch-results"></ul>
             </div>
           </section>
           <section class="quiet">
@@ -148,75 +211,191 @@ def create_application(config: WebConfig) -> tuple[Any, str]:
             </form>
           </section>
         </main>
+        <div class="bulk-bar" role="group" aria-label="批量下载">
+          <span id="downloadSelection">尚未选择文件</span>
+          <button id="downloadSelected" type="button" disabled>下载所选文件</button>
+        </div>
         <script>
+          const downloadStatus = document.getElementById('downloadStatus');
+          const downloadChoices = [...document.querySelectorAll('.download-choice')];
+          const downloadSelected = document.getElementById('downloadSelected');
+          const downloadSelection = document.getElementById('downloadSelection');
           const uploadForm = document.getElementById('uploadForm');
           const uploadFile = document.getElementById('uploadFile');
           const uploadButton = document.getElementById('uploadButton');
+          const uploadCancel = document.getElementById('uploadCancel');
+          const uploadRetry = document.getElementById('uploadRetry');
           const uploadProgressBox = document.getElementById('uploadProgressBox');
           const uploadProgress = document.getElementById('uploadProgress');
           const uploadStatus = document.getElementById('uploadStatus');
+          const uploadResults = document.getElementById('uploadResults');
           const uploadCsrf = {json.dumps(csrf_token)};
+          let currentUpload = null;
+          let stopUploadQueue = false;
+          let failedUploads = [];
 
           function uploadMegabytes(bytes) {{
             return (bytes / 1000000).toFixed(2);
           }}
 
+          function updateDownloadSelection() {{
+            const count = downloadChoices.filter(item => item.checked).length;
+            downloadSelection.textContent = count ? `已选择 ${{count}} 个文件` : '尚未选择文件';
+            downloadSelected.disabled = count === 0;
+          }}
+
+          async function beginDownload(ticketUrl, label, batchId = '') {{
+            const ticket = new URL(ticketUrl, window.location.href);
+            if (batchId) ticket.searchParams.set('batch_id', batchId);
+            const response = await fetch(ticket, {{ cache: 'no-store' }});
+            if (!response.ok) throw new Error(`HTTP ${{response.status}}`);
+            const ticketData = await response.json();
+            const anchor = document.createElement('a');
+            anchor.href = ticketData.download_url;
+            anchor.target = 'downloadTarget';
+            anchor.download = '';
+            anchor.hidden = true;
+            document.body.appendChild(anchor);
+            anchor.click();
+            anchor.remove();
+            downloadStatus.textContent = `已将“${{label}}”交给浏览器下载。`;
+            return ticketData;
+          }}
+
+          async function waitForLogicalDownload(ticketData, label) {{
+            while (true) {{
+              await new Promise(resolve => setTimeout(resolve, 1000));
+              const response = await fetch(ticketData.status_url, {{ cache: 'no-store' }});
+              if (!response.ok) throw new Error(`HTTP ${{response.status}}`);
+              const state = await response.json();
+              if (state.status === 'completed') return;
+              if (state.status === 'failed' || state.status === 'missing') {{
+                throw new Error(state.status);
+              }}
+              downloadStatus.textContent = state.status === 'waiting_retry'
+                ? `“${{label}}”正在等待浏览器继续下载……`
+                : `正在下载“${{label}}”；完成后将开始下一项。`;
+            }}
+          }}
+
+          for (const link of document.querySelectorAll('.file-link')) {{
+            link.addEventListener('click', async event => {{
+              event.preventDefault();
+              try {{
+                await beginDownload(link.dataset.ticketUrl, link.textContent);
+              }} catch (_error) {{
+                downloadStatus.textContent = '无法开始下载；服务可能已停止或网络已经变化。';
+              }}
+            }});
+          }}
+          for (const choice of downloadChoices) choice.addEventListener('change', updateDownloadSelection);
+          downloadSelected.addEventListener('click', async () => {{
+            const selected = downloadChoices.filter(item => item.checked);
+            if (!selected.length || !confirm(`确定依次下载所选的 ${{selected.length}} 个文件吗？浏览器可能询问是否允许多文件下载。`)) return;
+            downloadSelected.disabled = true;
+            const batchId = Array.from(crypto.getRandomValues(new Uint8Array(12)), value => value.toString(16).padStart(2, '0')).join('');
+            let started = 0;
+            for (const [index, choice] of selected.entries()) {{
+              const label = choice.closest('.file-row').querySelector('.file-link').textContent;
+              downloadStatus.textContent = `正在开始第 ${{index + 1}} / ${{selected.length}} 个文件：${{label}}`;
+              try {{
+                const ticketData = await beginDownload(choice.dataset.ticketUrl, label, batchId);
+                await waitForLogicalDownload(ticketData, label);
+                started += 1;
+              }} catch (_error) {{
+                downloadStatus.textContent = `第 ${{index + 1}} 个文件未能开始；已停止本批次。`;
+                break;
+              }}
+            }}
+            downloadStatus.textContent = `本批次已完成 ${{started}} / ${{selected.length}} 个文件。`;
+            downloadSelected.disabled = false;
+          }});
+
+          function setUploadControls(running) {{
+            uploadButton.disabled = running;
+            uploadFile.disabled = running;
+            uploadCancel.hidden = !running;
+          }}
+
+          function appendUploadResult(file, message, success) {{
+            const row = document.createElement('li');
+            row.className = success ? 'success' : 'failure';
+            row.textContent = `${{file.name}}：${{message}}`;
+            uploadResults.appendChild(row);
+          }}
+
+          function uploadOne(file, index, total, completedBytes, totalBytes) {{
+            return new Promise(resolve => {{
+              const startedAt = performance.now();
+              const xhr = new XMLHttpRequest();
+              currentUpload = xhr;
+              xhr.open('POST', '/upload/raw');
+              xhr.setRequestHeader('Content-Type', 'application/octet-stream');
+              xhr.setRequestHeader('X-LanDrop-CSRF', uploadCsrf);
+              xhr.setRequestHeader('X-LanDrop-Filename', encodeURIComponent(file.name));
+              xhr.upload.addEventListener('progress', progressEvent => {{
+                const loaded = progressEvent.lengthComputable ? progressEvent.loaded : 0;
+                uploadProgress.max = Math.max(totalBytes, 1);
+                uploadProgress.value = Math.min(totalBytes, completedBytes + loaded);
+                const elapsedSeconds = Math.max((performance.now() - startedAt) / 1000, 0.001);
+                const speed = loaded / elapsedSeconds / 1000000;
+                const percent = file.size ? Math.min(100, loaded / file.size * 100) : 100;
+                uploadStatus.textContent = `第 ${{index + 1}} / ${{total}} 个：${{file.name}} · ${{percent.toFixed(1)}}% · ${{uploadMegabytes(loaded)}} / ${{uploadMegabytes(file.size)}} MB · ${{speed.toFixed(2)}} MB/s`;
+              }});
+              xhr.addEventListener('load', () => resolve({{ ok: xhr.status >= 200 && xhr.status < 300, status: `HTTP ${{xhr.status}}` }}));
+              xhr.addEventListener('error', () => resolve({{ ok: false, status: '连接中断' }}));
+              xhr.addEventListener('abort', () => resolve({{ ok: false, status: '已取消' }}));
+              xhr.send(file);
+            }});
+          }}
+
+          async function runUploadQueue(files) {{
+            if (!files.length) return;
+            uploadButton.disabled = true;
+            stopUploadQueue = false;
+            failedUploads = [];
+            uploadRetry.hidden = true;
+            uploadProgressBox.hidden = false;
+            uploadResults.replaceChildren();
+            const totalBytes = files.reduce((sum, file) => sum + file.size, 0);
+            let completedBytes = 0;
+            let completed = 0;
+            setUploadControls(true);
+            uploadProgress.max = Math.max(totalBytes, 1);
+            uploadProgress.value = 0;
+            for (const [index, file] of files.entries()) {{
+              if (stopUploadQueue) {{
+                appendUploadResult(file, '未开始', false);
+                failedUploads.push(file);
+                continue;
+              }}
+              uploadStatus.textContent = `正在建立第 ${{index + 1}} / ${{files.length}} 个上传连接：${{file.name}}`;
+              const result = await uploadOne(file, index, files.length, completedBytes, totalBytes);
+              currentUpload = null;
+              if (result.ok) {{
+                completed += 1;
+                completedBytes += file.size;
+                uploadProgress.value = completedBytes;
+                appendUploadResult(file, '上传成功', true);
+              }} else {{
+                failedUploads.push(file);
+                appendUploadResult(file, result.status, false);
+              }}
+            }}
+            setUploadControls(false);
+            uploadRetry.hidden = failedUploads.length === 0;
+            uploadStatus.textContent = `整批完成：${{completed}} 成功 / ${{failedUploads.length}} 失败或未开始。`;
+          }}
+
           uploadForm.addEventListener('submit', event => {{
             event.preventDefault();
-            const file = uploadFile.files[0];
-            if (!file) return;
-
-            uploadButton.disabled = true;
-            uploadFile.disabled = true;
-            uploadProgressBox.hidden = false;
-            uploadProgress.max = Math.max(file.size, 1);
-            uploadProgress.value = 0;
-            uploadStatus.textContent = '正在建立上传连接……';
-            const startedAt = performance.now();
-            const xhr = new XMLHttpRequest();
-            xhr.open('POST', '/upload/raw');
-            xhr.setRequestHeader('Content-Type', 'application/octet-stream');
-            xhr.setRequestHeader('X-LanDrop-CSRF', uploadCsrf);
-            xhr.setRequestHeader('X-LanDrop-Filename', encodeURIComponent(file.name));
-
-            xhr.upload.addEventListener('progress', progressEvent => {{
-              if (!progressEvent.lengthComputable) {{
-                uploadStatus.textContent = '正在上传，请保持页面打开……';
-                return;
-              }}
-              uploadProgress.max = Math.max(progressEvent.total, 1);
-              uploadProgress.value = progressEvent.loaded;
-              const elapsedSeconds = Math.max((performance.now() - startedAt) / 1000, 0.001);
-              const speed = progressEvent.loaded / elapsedSeconds / 1000000;
-              const percent = progressEvent.total
-                ? Math.min(100, progressEvent.loaded / progressEvent.total * 100)
-                : 0;
-              uploadStatus.textContent = `${{percent.toFixed(1)}}% · ${{uploadMegabytes(progressEvent.loaded)}} / ${{uploadMegabytes(progressEvent.total)}} MB · ${{speed.toFixed(2)}} MB/s`;
-            }});
-
-            xhr.addEventListener('load', () => {{
-              if (xhr.status >= 200 && xhr.status < 300) {{
-                document.open();
-                document.write(xhr.responseText);
-                document.close();
-                return;
-              }}
-              uploadButton.disabled = false;
-              uploadFile.disabled = false;
-              uploadStatus.textContent = `上传失败（HTTP ${{xhr.status}}），请返回首页重试。`;
-            }});
-            xhr.addEventListener('error', () => {{
-              uploadButton.disabled = false;
-              uploadFile.disabled = false;
-              uploadStatus.textContent = '上传连接中断；服务可能已停止或网络已经变化。';
-            }});
-            xhr.addEventListener('abort', () => {{
-              uploadButton.disabled = false;
-              uploadFile.disabled = false;
-              uploadStatus.textContent = '上传已取消。';
-            }});
-            xhr.send(file);
+            runUploadQueue([...uploadFile.files]);
           }});
+          uploadCancel.addEventListener('click', () => {{
+            stopUploadQueue = true;
+            if (currentUpload) currentUpload.abort();
+          }});
+          uploadRetry.addEventListener('click', () => runUploadQueue([...failedUploads]));
         </script>
         """
         return _page("LanDrop", body)
@@ -342,39 +521,78 @@ def create_application(config: WebConfig) -> tuple[Any, str]:
             return _html_response(_error_page(404, "请求文件不存在。"), 404)
         relative = candidate.relative_to(config.shared_directory.resolve(strict=True)).as_posix()
         download_id = secrets.token_urlsafe(12)
+        submitted_batch_id = request.query.getunicode("batch_id") or ""
+        batch_id = (
+            submitted_batch_id
+            if re.fullmatch(r"[A-Za-z0-9_-]{8,64}", submitted_batch_id)
+            else ""
+        )
         target = (
             "/download/"
             + quote(relative, safe="/")
             + "?download_id="
             + quote(download_id, safe="")
         )
+        if batch_id:
+            target += "&batch_id=" + quote(batch_id, safe="")
+        try:
+            lifecycle.register_download(download_id, candidate.stat().st_size)
+        except SessionExpiredError:
+            return expired_response() or _html_response(_error_page(503, "会话已到期。"), 503)
         return HTTPResponse(
-            body=json.dumps({"download_url": target}, ensure_ascii=False),
+            body=json.dumps(
+                {
+                    "download_url": target,
+                    "status_url": "/download-status/" + quote(download_id, safe=""),
+                },
+                ensure_ascii=False,
+            ),
+            status=200,
+            content_type="application/json; charset=UTF-8",
+        )
+
+    @app.get("/download-status/<download_id>")
+    def download_status(download_id: str) -> HTTPResponse:
+        expired = expired_response()
+        if expired is not None:
+            return expired
+        client = require_client()
+        if isinstance(client, HTTPResponse):
+            return client
+        if not re.fullmatch(r"[A-Za-z0-9_-]{8,64}", download_id):
+            return HTTPResponse(
+                body=json.dumps({"status": "missing"}),
+                status=404,
+                content_type="application/json; charset=UTF-8",
+            )
+        return HTTPResponse(
+            body=json.dumps({"status": lifecycle.download_task_status(download_id)}),
             status=200,
             content_type="application/json; charset=UTF-8",
         )
 
     @app.post("/pair")
     def pair() -> HTTPResponse:
+        if current_client() is not None:
+            return redirect("/", code=303)
         expired = expired_response()
         if expired is not None:
             return expired
         remote = request.remote_addr or "unknown"
-        with pairing_lock:
-            attempts = failed_pairing.get(remote, 0)
-        if attempts >= PAIRING_ATTEMPT_LIMIT:
-            return _html_response(
-                _page("配对受限", "<h1>尝试次数过多</h1><p>请重启服务以重新生成配对码。</p>"),
-                429,
-            )
-
         if request.content_length < 0 or request.content_length > SMALL_FORM_LIMIT:
             return _html_response(_error_page(413, "配对请求大小无效。"), 413)
 
         submitted = _pairing_digits(request.forms.getunicode("code") or "")
-        if not lifecycle.consume_pairing_code(submitted):
-            with pairing_lock:
-                failed_pairing[remote] = attempts + 1
+        device_name = request.forms.getunicode("device_name") or ""
+        result, credential = complete_new_client_pairing(
+            "code", submitted, device_name, remote
+        )
+        if result == "limited":
+            return _html_response(
+                _page("配对受限", "<h1>尝试次数过多</h1><p>请重启服务以重新生成配对码。</p>"),
+                429,
+            )
+        if result == "invalid":
             return _html_response(
                 _page(
                     "配对失败",
@@ -383,31 +601,60 @@ def create_application(config: WebConfig) -> tuple[Any, str]:
                 ),
                 403,
             )
+        if result != "success":
+            return _html_response(
+                _page(
+                    "配对未完成",
+                    "<h1>配对未完成</h1><p>会话状态或可信客户机记录发生变化，"
+                    "本次请求没有建立信任。请查看服务机上的当前邀请后重试。</p>",
+                ),
+                503,
+            )
+        return trusted_cookie_response(credential)
 
-        user_agent = request.get_header("User-Agent") or "浏览器"
-        device_name = request.forms.getunicode("device_name") or ""
-        client_hints = {
-            "brands": request.get_header("Sec-CH-UA") or "",
-            "mobile": request.get_header("Sec-CH-UA-Mobile") or "",
-            "platform": request.get_header("Sec-CH-UA-Platform") or "",
-            "model": request.get_header("Sec-CH-UA-Model") or "",
-        }
-        _client, credential = config.credentials.issue(
-            user_agent,
-            device_name,
-            client_hints,
+    @app.get("/pair/qr")
+    def qr_pairing_landing() -> HTTPResponse | str:
+        if current_client() is not None:
+            return redirect("/", code=303)
+        expired = expired_response()
+        if expired is not None:
+            return expired
+        return _qr_pairing_page()
+
+    @app.post("/pair/qr")
+    def qr_pair() -> HTTPResponse:
+        if current_client() is not None:
+            return redirect("/", code=303)
+        expired = expired_response()
+        if expired is not None:
+            return expired
+        if request.content_length < 0 or request.content_length > SMALL_FORM_LIMIT:
+            return _html_response(_error_page(413, "二维码配对请求大小无效。"), 413)
+
+        submitted = request.forms.getunicode("token") or ""
+        result, credential = complete_new_client_pairing(
+            "qr", submitted, "", request.remote_addr or "unknown"
         )
-        response.set_cookie(
-            COOKIE_NAME,
-            credential,
-            path="/",
-            max_age=365 * 24 * 60 * 60,
-            httponly=True,
-            samesite="Strict",
-        )
-        with pairing_lock:
-            failed_pairing.pop(remote, None)
-        return redirect("/", code=303)
+        if result == "invalid":
+            return _html_response(
+                _page(
+                    "邀请已失效",
+                    "<main class=\"narrow\"><h1>邀请已使用或失效</h1>"
+                    "<p>请重新扫描服务机当前显示的二维码，或使用当前 8 位配对码。</p>"
+                    "<p><a href=\"/\">改用配对码</a></p></main>",
+                ),
+                403,
+            )
+        if result != "success":
+            return _html_response(
+                _page(
+                    "配对未完成",
+                    "<main class=\"narrow\"><h1>配对未完成</h1>"
+                    "<p>本次请求没有建立信任，请重新扫描当前二维码。</p></main>",
+                ),
+                503,
+            )
+        return trusted_cookie_response(credential)
 
     @app.get("/download/<filepath:path>")
     def download(filepath: str) -> HTTPResponse:
@@ -695,6 +942,45 @@ def _pairing_page() -> str:
     return _page("连接 LanDrop", body)
 
 
+def _qr_pairing_page() -> str:
+    """Landing page that removes the fragment before submitting its secret."""
+    body = """
+    <main class="narrow" id="qrStatus">
+      <h1>正在连接 LanDrop</h1>
+      <p>正在验证这次局域网邀请……</p>
+    </main>
+    <script>
+      const fragment = window.location.hash;
+      const qrToken = fragment.startsWith('#') ? fragment.slice(1) : '';
+      history.replaceState(null, '', window.location.pathname + window.location.search);
+      const qrStatus = document.getElementById('qrStatus');
+      async function completeQrPairing() {
+        if (!qrToken) {
+          qrStatus.innerHTML = '<h1>二维码内容无效</h1><p>请重新扫描服务机当前显示的二维码。</p>';
+          return;
+        }
+        const response = await fetch('/pair/qr', {
+          method: 'POST',
+          credentials: 'same-origin',
+          headers: {'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8'},
+          body: new URLSearchParams({token: qrToken}).toString()
+        });
+        if (response.redirected || response.ok) {
+          window.location.replace(response.url || '/');
+          return;
+        }
+        document.open();
+        document.write(await response.text());
+        document.close();
+      }
+      completeQrPairing().catch(() => {
+        qrStatus.innerHTML = '<h1>连接未完成</h1><p>请确认客户机仍与服务机处于同一网络，然后重新扫码。</p>';
+      });
+    </script>
+    """
+    return _page("连接 LanDrop", body)
+
+
 def _pairing_digits(value: str) -> str:
     return "".join(character for character in value if "0" <= character <= "9")
 
@@ -776,7 +1062,7 @@ def _page(title: str, body: str) -> str:
   <title>{html.escape(title)}</title>
   <style>
     :root {{ color-scheme: light dark; font-family: system-ui, sans-serif; }}
-    body {{ margin: 0; background: #f5f7fb; color: #182230; }}
+    body {{ margin: 0; padding-bottom: 88px; background: #f5f7fb; color: #182230; }}
     header, main {{ width: min(760px, calc(100% - 32px)); margin: 24px auto; }}
     main {{ display: grid; gap: 18px; }}
     section, .narrow {{ background: white; border-radius: 14px; padding: 20px; box-shadow: 0 5px 20px #18223012; }}
@@ -789,11 +1075,34 @@ def _page(title: str, body: str) -> str:
     .upload-progress {{ width: 100%; margin-top: 12px; }}
     .upload-progress progress {{ width: 100%; height: 16px; }}
     .upload-progress p {{ margin: 6px 0 0; overflow-wrap: anywhere; }}
+    .batch-results {{ display: grid; gap: 6px; padding-left: 20px; margin-bottom: 0; }}
+    .batch-results .success {{ color: #087443; }}
+    .batch-results .failure {{ color: #b42318; }}
     .files {{ list-style: none; padding: 0; margin: 0; }}
-    .files li {{ display: flex; justify-content: space-between; gap: 12px; padding: 10px 0; border-bottom: 1px solid #dfe5ed; }}
-    .files a {{ overflow-wrap: anywhere; }}
+    .files li {{ display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 48px; padding: 8px 0; border-bottom: 1px solid #dfe5ed; }}
+    .file-choice {{ display: grid; grid-template-columns: 26px minmax(0, 1fr); align-items: center; flex: 1; min-width: 0; }}
+    .file-choice input {{ width: 20px; height: 20px; margin: 0; padding: 0; }}
+    .file-link {{ min-width: 0; padding: 8px 4px; overflow-wrap: anywhere; font-weight: 650; }}
+    .file-size {{ flex: none; color: #667085; font-size: 13px; }}
+    .transfer-status {{ min-height: 24px; margin-bottom: 0; color: #475467; overflow-wrap: anywhere; }}
+    .bulk-bar {{ position: fixed; z-index: 10; left: 50%; bottom: 12px; transform: translateX(-50%); display: flex; align-items: center; justify-content: space-between; gap: 12px; width: min(728px, calc(100% - 32px)); padding: 12px 14px; border: 1px solid #d7deea; border-radius: 14px; background: #fff; box-shadow: 0 8px 28px #1822302b; }}
+    .bulk-bar span {{ color: #475467; font-size: 14px; }}
     .quiet {{ box-shadow: none; background: transparent; padding: 0; }}
-    @media (prefers-color-scheme: dark) {{ body {{ background: #111722; color: #edf3fa; }} section, .narrow {{ background: #1b2431; }} }}
+    @media (max-width: 560px) {{
+      header, main {{ width: min(100% - 20px, 760px); margin: 14px auto; }}
+      section, .narrow {{ padding: 16px; border-radius: 12px; }}
+      form {{ align-items: stretch; }}
+      form input[type="file"] {{ width: 100%; }}
+      form button {{ flex: 1; min-height: 44px; }}
+      .file-size {{ max-width: 88px; text-align: right; }}
+      .bulk-bar {{ width: calc(100% - 20px); bottom: 8px; }}
+    }}
+    @media (prefers-color-scheme: dark) {{
+      body {{ background: #111722; color: #edf3fa; }}
+      section, .narrow, .bulk-bar {{ background: #1b2431; }}
+      .bulk-bar {{ border-color: #344054; }}
+      .file-size, .transfer-status, .bulk-bar span {{ color: #b7c0cf; }}
+    }}
   </style>
 </head>
 <body>{body}</body>

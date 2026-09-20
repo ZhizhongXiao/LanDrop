@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>卸载 LanDrop</title>
+  <link rel="stylesheet" href="../desktop/css/tokens.css">
+  <link rel="stylesheet" href="../wizard/css/wizard.css">
+</head>
+<body>
+  <main class="wizard-shell">
+    <aside class="wizard-rail">
+      <button class="wizard-brand" type="button" data-theme-toggle aria-label="主题：跟随系统；点击切换为深色模式"><span class="wizard-brand-icon"><img src="../../assets/LanDrop-icon-preview.png" alt=""><span class="theme-indicator" data-theme-indicator aria-hidden="true">◐</span></span><span class="wizard-brand-copy"><strong>LanDrop</strong><span>卸载向导</span></span></button>
+      <ol class="wizard-steps">
+        <li class="wizard-step active"><b>1</b><span>卸载说明</span></li>
+        <li class="wizard-step"><b>2</b><span>保留数据</span></li>
+        <li class="wizard-step"><b>3</b><span>确认卸载</span></li>
+      </ol>
+      <p class="rail-note">卸载前后状态保持一致且可解释；用户数据只有在明确选择后才会删除。</p>
+    </aside>
+    <section class="wizard-main">
+      <div class="wizard-content">
+        <section class="wizard-page active">
+          <p class="wizard-kicker">UNINSTALL</p><h1>卸载 LanDrop</h1>
+          <p class="wizard-lead">正式卸载器将先停止传输服务、关闭 TCP 8000，再删除程序文件和由安装器创建的系统入口。</p>
+          <div class="preview-note">这是界面草图，不会停止当前 LanDrop 或删除任何文件。</div>
+        </section>
+        <section class="wizard-page">
+          <p class="wizard-kicker">USER DATA</p><h1>选择要保留的数据</h1>
+          <p class="wizard-lead">默认保留配置、日志和可信客户机。删除这些数据必须由用户分别明确选择。</p>
+          <div class="choice-list">
+            <label class="choice"><input type="checkbox"><span><strong>删除配置</strong><small>包括共享目录、接收目录和上传上限。</small></span></label>
+            <label class="choice"><input type="checkbox"><span><strong>删除日志</strong><small>清理 %LOCALAPPDATA%\LanDrop\logs。</small></span></label>
+            <label class="choice"><input type="checkbox"><span><strong>删除可信客户机</strong><small>以后再次安装时，所有浏览器都需要重新配对。</small></span></label>
+          </div>
+        </section>
+        <section class="wizard-page">
+          <p class="wizard-kicker">CONFIRM</p><h1>确认卸载</h1>
+          <p class="wizard-lead">正式流程会清理由安装器创建的快捷方式、通知身份、开机启动项和防火墙规则；不会碰触用户收发的文件。</p>
+          <div class="summary-list">
+            <div class="summary-row"><strong>传输服务</strong><span>停止并关闭 TCP 8000</span></div>
+            <div class="summary-row"><strong>系统入口</strong><span>清理由安装器创建的项目</span></div>
+            <div class="summary-row"><strong>收发文件</strong><span>始终保留</span></div>
+          </div>
+          <div id="previewResult" class="preview-note">尚未执行卸载。</div>
+        </section>
+      </div>
+      <footer class="wizard-footer"><span class="wizard-version">LanDrop · 卸载器视觉草图</span><div class="footer-actions"><button id="back" class="wizard-button" type="button">返回</button><button id="next" class="wizard-button primary" type="button">继续</button></div></footer>
+    </section>
+  </main>
+  <script src="../shared/js/theme.js"></script>
+  <script src="../wizard/js/wizard.js"></script>
+  <script src="js/uninstall.js"></script>
+</body>
+</html>

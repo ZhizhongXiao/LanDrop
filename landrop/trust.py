@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from contextlib import contextmanager
+from dataclasses import dataclass, field as dataclass_field
 from datetime import datetime, timezone
 import hashlib
 import json
@@ -11,6 +12,7 @@ from pathlib import Path
 import re
 import secrets
 import threading
+from typing import Iterator
 
 
 MAX_TRUSTED_CLIENTS = 20
@@ -29,6 +31,25 @@ class TrustedClient:
     browser_engine: str = "未知"
 
 
+@dataclass(frozen=True, slots=True)
+class PreparedCredential:
+    """A browser credential that has not been made durable yet."""
+
+    client: TrustedClient
+    credential: str = dataclass_field(repr=False)
+    record: dict[str, object] = dataclass_field(repr=False)
+
+
+class CredentialPersistence:
+    """Marks a prepared credential durable only after its caller commits."""
+
+    def __init__(self) -> None:
+        self.committed = False
+
+    def commit(self) -> None:
+        self.committed = True
+
+
 class CredentialStore:
     """Small atomic JSON store; raw browser tokens are never persisted."""
 
@@ -43,6 +64,18 @@ class CredentialStore:
         device_name: str = "",
         client_hints: dict[str, str] | None = None,
     ) -> tuple[TrustedClient, str]:
+        prepared = self.prepare(user_agent, device_name, client_hints)
+        with self.persist_prepared(prepared) as persistence:
+            persistence.commit()
+        return prepared.client, prepared.credential
+
+    def prepare(
+        self,
+        user_agent: str,
+        device_name: str = "",
+        client_hints: dict[str, str] | None = None,
+    ) -> PreparedCredential:
+        """Build a credential without changing the persistent trust file."""
         client_id = secrets.token_urlsafe(9)
         token = secrets.token_urlsafe(32)
         created_at = datetime.now(timezone.utc).isoformat()
@@ -61,12 +94,33 @@ class CredentialStore:
             "created_at": created_at,
             "token_hash": _token_hash(token),
         }
+        return PreparedCredential(
+            client=_client_from_record(record),
+            credential=f"{client_id}.{token}",
+            record=record,
+        )
+
+    @contextmanager
+    def persist_prepared(
+        self,
+        prepared: PreparedCredential,
+    ) -> Iterator[CredentialPersistence]:
+        """Persist one prepared credential with compensating rollback.
+
+        The store lock remains held until the caller confirms that its related
+        in-memory state has also committed.  If that confirmation never
+        arrives, the exact previous trust set is restored atomically.
+        """
         with self._lock:
-            records = self._load()
-            records.append(record)
-            records = records[-MAX_TRUSTED_CLIENTS:]
+            previous = self._load()
+            records = [*previous, dict(prepared.record)][-MAX_TRUSTED_CLIENTS:]
             self._save(records)
-        return _client_from_record(record), f"{client_id}.{token}"
+            persistence = CredentialPersistence()
+            try:
+                yield persistence
+            finally:
+                if not persistence.committed:
+                    self._save(previous)
 
     def verify(self, credential: str | None) -> TrustedClient | None:
         if not credential or "." not in credential:
@@ -114,7 +168,7 @@ class CredentialStore:
         except FileNotFoundError:
             return []
         except (OSError, json.JSONDecodeError) as exc:
-            raise RuntimeError(f"无法读取可信客户端记录：{exc}") from exc
+            raise RuntimeError(f"无法读取可信客户机记录：{exc}") from exc
         records = payload.get("clients", []) if isinstance(payload, dict) else []
         return records if isinstance(records, list) else []
 

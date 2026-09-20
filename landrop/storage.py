@@ -9,7 +9,9 @@ from pathlib import Path
 import re
 import secrets
 import shutil
+import stat
 import threading
+import time
 import unicodedata
 from typing import BinaryIO, Callable
 
@@ -17,6 +19,7 @@ from typing import BinaryIO, Callable
 COPY_CHUNK_SIZE = 1024 * 1024
 MINIMUM_FREE_SPACE = 10 * 1024 * 1024
 MAX_FILENAME_LENGTH = 180
+ORPHAN_PART_MIN_AGE_SECONDS = 24 * 60 * 60
 
 _WINDOWS_RESERVED = {
     "CON",
@@ -28,6 +31,7 @@ _WINDOWS_RESERVED = {
 }
 _INVALID_FILENAME = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 _WHITESPACE = re.compile(r"\s+")
+_LANDROP_PART_FILE = re.compile(r"^\..+\.[0-9a-f]{24}\.part$")
 _destination_lock = threading.Lock()
 
 
@@ -58,6 +62,13 @@ class UploadResult:
     filename: str
     size: int
     renamed: bool
+
+
+@dataclass(frozen=True, slots=True)
+class PartCleanupResult:
+    removed: int
+    skipped: int
+    errors: tuple[str, ...]
 
 
 def sanitize_filename(raw_filename: str) -> str:
@@ -145,6 +156,41 @@ def save_upload(
             pass
 
 
+def cleanup_orphaned_upload_parts(
+    receive_directory: Path,
+    *,
+    minimum_age_seconds: float = ORPHAN_PART_MIN_AGE_SECONDS,
+) -> PartCleanupResult:
+    """Delete only direct-child regular files matching LanDrop's temp format."""
+    root = receive_directory.resolve(strict=True)
+    if not root.is_dir():
+        raise StorageError(f"接收路径不是目录：{root}")
+    removed = 0
+    skipped = 0
+    errors: list[str] = []
+    try:
+        candidates = list(root.iterdir())
+    except OSError as exc:
+        raise StorageError(f"无法检查上传保存目录中的临时文件：{exc}") from exc
+
+    for candidate in candidates:
+        if not _LANDROP_PART_FILE.fullmatch(candidate.name):
+            continue
+        try:
+            metadata = candidate.lstat()
+            if not stat.S_ISREG(metadata.st_mode):
+                skipped += 1
+                continue
+            if time.time() - metadata.st_mtime < max(0.0, minimum_age_seconds):
+                skipped += 1
+                continue
+            candidate.unlink()
+            removed += 1
+        except OSError as exc:
+            errors.append(f"{candidate.name}: {exc}")
+    return PartCleanupResult(removed, skipped, tuple(errors))
+
+
 def list_shared_files(shared_directory: Path) -> list[ListedFile]:
     """List regular files that resolve beneath the shared root."""
     root = shared_directory.resolve(strict=True)
@@ -170,10 +216,10 @@ def resolve_shared_file(shared_directory: Path, relative_path: str) -> Path:
         raise InvalidFilenameError("请求路径包含非法字符。")
     parts = Path(relative_path.replace("/", os.sep)).parts
     if any(part == ".." for part in parts):
-        raise InvalidFilenameError("请求路径不能超出共享目录。")
+        raise InvalidFilenameError("请求路径不能超出提供下载的目录。")
     candidate = root.joinpath(*parts).resolve(strict=False)
     if not candidate.is_relative_to(root):
-        raise InvalidFilenameError("请求路径不能超出共享目录。")
+        raise InvalidFilenameError("请求路径不能超出提供下载的目录。")
     if candidate.name.endswith(".part") or not candidate.is_file():
         raise FileNotFoundError(relative_path)
     return candidate

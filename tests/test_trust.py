@@ -8,6 +8,20 @@ from support import temporary_directory
 
 
 class CredentialStoreTests(unittest.TestCase):
+    def test_prepared_credential_is_rolled_back_until_explicit_commit(self) -> None:
+        with temporary_directory() as temporary:
+            store = CredentialStore(Path(temporary))
+            prepared = store.prepare("Test Browser")
+            self.assertFalse(store.path.exists())
+
+            with store.persist_prepared(prepared):
+                self.assertIsNotNone(store.verify(prepared.credential))
+            self.assertEqual(store.list_clients(), [])
+
+            with store.persist_prepared(prepared) as persistence:
+                persistence.commit()
+            self.assertIsNotNone(store.verify(prepared.credential))
+
     def test_stores_hash_verifies_and_revokes(self) -> None:
         with temporary_directory() as temporary:
             store = CredentialStore(Path(temporary))

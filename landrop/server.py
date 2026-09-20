@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+import logging
 import sys
 import socket
 import threading
 from socketserver import TCPServer, ThreadingMixIn
 from typing import Any
 from wsgiref.simple_server import WSGIRequestHandler, WSGIServer, make_server
+
+
+logger = logging.getLogger("landrop.server")
 
 
 SHUTDOWN_POLL_INTERVAL_SECONDS = 0.1
@@ -22,7 +26,7 @@ class LanDropRequestHandler(WSGIRequestHandler):
         return self.client_address[0]
 
     def log_message(self, message_format: str, *args: object) -> None:
-        print(f"[请求] {self.client_address[0]} - {message_format % args}")
+        logger.info("[请求] %s - %s", self.client_address[0], message_format % args)
 
 
 class ThreadedWSGIServer(ThreadingMixIn, WSGIServer):
@@ -78,9 +82,9 @@ class ThreadedWSGIServer(ThreadingMixIn, WSGIServer):
             error,
             (BrokenPipeError, ConnectionAbortedError, ConnectionResetError),
         ):
-            print(
-                f"[连接结束] {client_address[0]} 主动关闭了连接；"
-                "浏览器取消或结束请求时可能出现。"
+            logger.info(
+                "[连接结束] %s 主动关闭了连接；浏览器取消或结束请求时可能出现。",
+                client_address[0],
             )
             return
         super().handle_error(request, client_address)

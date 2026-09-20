@@ -95,6 +95,7 @@ class LifecycleSnapshot:
     remaining_milliseconds: int
     grace_remaining_milliseconds: int
     pairing_code: str
+    pairing_revision: int
     paired_devices: int
     active_transfers: int
     stop_reason: str
@@ -103,6 +104,16 @@ class LifecycleSnapshot:
 
     def to_dict(self) -> dict[str, object]:
         return asdict(self)
+
+
+@dataclass(frozen=True, slots=True)
+class PairingCommit:
+    """Prepared next pairing state, valid for exactly one revision."""
+
+    session_id: str
+    pairing_revision: int
+    next_pairing_code: str
+    next_qr_token: str = field(repr=False)
 
 
 class TransferHandle:
@@ -167,6 +178,8 @@ class SessionLifecycle:
         self._stop_reason = ""
         self._should_close = False
         self._pairing_code = _new_pairing_code()
+        self._pairing_revision = 1
+        self._qr_token = _new_qr_token()
         self._paired_devices = 0
         self._active: dict[str, _ActiveTransfer] = {}
         self._download_tasks: dict[str, _DownloadTask] = {}
@@ -177,6 +190,53 @@ class SessionLifecycle:
     def pairing_code(self) -> str:
         with self._lock:
             return self._pairing_code
+
+    @property
+    def pairing_revision(self) -> int:
+        with self._lock:
+            return self._pairing_revision
+
+    def pairing_invitation(self) -> tuple[str, int, str] | None:
+        """Return the current in-memory QR secret for the local GUI only."""
+        with self._lock:
+            self._advance(self._clock())
+            if self._phase != "running" or not self._qr_token:
+                return None
+            return self._session_id, self._pairing_revision, self._qr_token
+
+    def prepare_pairing(self, kind: str, submitted: str) -> PairingCommit | None:
+        """Validate a credential and prepare, but do not publish, its successor."""
+        if kind not in {"code", "qr"}:
+            raise ValueError("未知配对凭据类型。")
+        with self._lock:
+            self._advance(self._clock())
+            if self._phase != "running":
+                return None
+            expected = self._pairing_code if kind == "code" else self._qr_token
+            if not submitted or not secrets.compare_digest(submitted, expected):
+                return None
+            return PairingCommit(
+                session_id=self._session_id,
+                pairing_revision=self._pairing_revision,
+                next_pairing_code=_new_pairing_code(),
+                next_qr_token=_new_qr_token(),
+            )
+
+    def commit_pairing(self, prepared: PairingCommit) -> bool:
+        """Publish a prepared pairing only if its session/revision is current."""
+        with self._lock:
+            self._advance(self._clock())
+            if (
+                self._phase != "running"
+                or self._session_id != prepared.session_id
+                or self._pairing_revision != prepared.pairing_revision
+            ):
+                return False
+            self._paired_devices += 1
+            self._pairing_revision += 1
+            self._pairing_code = prepared.next_pairing_code
+            self._qr_token = prepared.next_qr_token
+            return True
 
     def activate(self) -> LifecycleSnapshot:
         """Anchor the deadline when the listener is ready, not during construction."""
@@ -238,15 +298,8 @@ class SessionLifecycle:
             )
 
     def consume_pairing_code(self, submitted: str) -> bool:
-        with self._lock:
-            self._advance(self._clock())
-            if self._phase != "running":
-                return False
-            if not secrets.compare_digest(submitted, self._pairing_code):
-                return False
-            self._paired_devices += 1
-            self._pairing_code = _new_pairing_code()
-            return True
+        prepared = self.prepare_pairing("code", submitted)
+        return prepared is not None and self.commit_pairing(prepared)
 
     def register_download(self, download_id: str, expected_size: int) -> None:
         if not download_id or expected_size < 0:
@@ -260,6 +313,21 @@ class SessionLifecycle:
                 download_id,
                 _DownloadTask(now, expected_size),
             )
+
+    def download_task_status(self, download_id: str) -> str:
+        """Return a browser-safe logical download state for batch sequencing."""
+        with self._lock:
+            task = self._download_tasks.get(download_id)
+            if task is None:
+                return "missing"
+            covered = _covered_bytes(task.completed_ranges, task.expected_size)
+            if task.finalized:
+                return "completed" if covered >= task.expected_size else "failed"
+            if task.active_streams:
+                return "active"
+            if task.last_failure_reason or task.completed_ranges:
+                return "waiting_retry"
+            return "pending"
 
     def begin_transfer(
         self,
@@ -436,6 +504,7 @@ class SessionLifecycle:
         self._stop_reason = reason
         self._should_close = True
         self._pairing_code = ""
+        self._qr_token = ""
         if transfer_failure_reason and self._active:
             self._cancel_reason = transfer_failure_reason
             for transfer in self._active.values():
@@ -467,6 +536,7 @@ class SessionLifecycle:
             remaining_milliseconds=remaining_ms,
             grace_remaining_milliseconds=grace_remaining_ms,
             pairing_code=self._pairing_code,
+            pairing_revision=self._pairing_revision,
             paired_devices=self._paired_devices,
             active_transfers=len(self._active),
             stop_reason=self._stop_reason,
@@ -502,3 +572,7 @@ def _covered_bytes(ranges: list[tuple[int, int]], expected_size: int) -> int:
 
 def _new_pairing_code() -> str:
     return f"{secrets.randbelow(100_000_000):08d}"
+
+
+def _new_qr_token() -> str:
+    return secrets.token_urlsafe(32)

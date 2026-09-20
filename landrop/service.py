@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timezone
 import errno
+import logging
 from pathlib import Path
 import sys
 import threading
@@ -21,9 +22,13 @@ from .network import (
     endpoint_baseline,
     select_interface,
 )
+from .qr_invite import qr_png_data_uri
 from .server import ServerGroup
 from .trust import CredentialStore
 from .web import WebConfig, create_application
+
+
+logger = logging.getLogger("landrop.service")
 
 
 class ServiceError(RuntimeError):
@@ -126,6 +131,8 @@ class ServiceController:
         self._lifecycle: SessionLifecycle | None = None
         self._started_at = ""
         self._logged_sessions: set[str] = set()
+        self._qr_cache_key: tuple[str, int, str] | None = None
+        self._qr_cache_data_uri = ""
         self._snapshot = ServiceSnapshot(
             running=False,
             phase="stopped",
@@ -146,6 +153,26 @@ class ServiceController:
         interfaces = self._discover()
         return [_interface_diagnostic(item) for item in interfaces]
 
+    def pairing_qr_data_uri(self) -> str:
+        """Render the current invitation for the local desktop UI only."""
+        with self._lock:
+            if self._lifecycle is None or self._server is None:
+                self._qr_cache_key = None
+                self._qr_cache_data_uri = ""
+                return ""
+            invitation = self._lifecycle.pairing_invitation()
+            if invitation is None:
+                return ""
+            session_id, revision, token = invitation
+            key = (session_id, revision, self._snapshot.lan_url)
+            if key == self._qr_cache_key:
+                return self._qr_cache_data_uri
+            invitation_url = f"{self._snapshot.lan_url.rstrip('/')}/pair/qr#{token}"
+            data_uri = qr_png_data_uri(invitation_url)
+            self._qr_cache_key = key
+            self._qr_cache_data_uri = data_uri
+            return data_uri
+
     def start(
         self,
         shared_directory: str | Path,
@@ -158,8 +185,8 @@ class ServiceController:
             if self._server is not None:
                 raise ServiceError("服务已经在运行。")
 
-            shared = _existing_directory(shared_directory, "共享")
-            received = _existing_directory(receive_directory, "接收")
+            shared = _existing_directory(shared_directory, "下载来源")
+            received = _existing_directory(receive_directory, "上传保存")
             if not 1 <= max_upload_mb <= 10_000:
                 raise ServiceError("上传上限必须在 1 到 10000 MB 之间。")
             directories_ready_at = perf_counter()
@@ -263,7 +290,7 @@ class ServiceController:
             state = self._current_snapshot_locked()
             ready_at = perf_counter()
             if self._emit_performance_timings:
-                print(
+                logger.debug(
                     "[启动耗时] "
                     f"目录 {directories_ready_at - started_at:.3f}s；"
                     f"网络检测 {network_ready_at - directories_ready_at:.3f}s；"
@@ -367,7 +394,7 @@ class ServiceController:
                     lifecycle_snapshot=lifecycle_snapshot,
                 )
             if self._emit_performance_timings:
-                print(
+                logger.debug(
                     "[停止耗时] "
                     f"服务器 {server_closed_at - stop_started_at:.3f}s；"
                     f"线程回收 {threads_joined_at - server_closed_at:.3f}s；"
@@ -574,7 +601,7 @@ class ServiceController:
                 endpoint_status="changed",
                 endpoint_detail=detail,
             )
-        print(f"[网络变化] {detail}")
+        logger.warning("[网络变化] %s", detail)
         self.stop(
             "network_changed",
             _expected_server=server,
@@ -676,7 +703,7 @@ class ServiceController:
                 grace_seconds=self._grace_seconds,
             )
         except OSError as exc:
-            print(f"[日志] 无法写入会话统计：{exc}")
+            logger.error("无法写入会话统计：%s", exc)
 
 
 def _existing_directory(path: str | Path, label: str) -> Path:

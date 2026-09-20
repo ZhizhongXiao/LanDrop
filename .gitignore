@@ -21,6 +21,7 @@ Thumbs.db
 build/
 dist/
 *.spec
+!LanDrop.spec
 
 # Runtime and incomplete transfers
 *.part

@@ -50,6 +50,33 @@ class SessionLifecycleTests(unittest.TestCase):
         self.assertFalse(self.lifecycle.consume_pairing_code("00000000"))
         self.assertEqual(self.lifecycle.snapshot().paired_devices, 1)
 
+    def test_code_and_qr_share_one_revision_and_rotate_together(self) -> None:
+        first = self.lifecycle.snapshot()
+        invitation = self.lifecycle.pairing_invitation()
+        self.assertIsNotNone(invitation)
+        assert invitation is not None
+        _session_id, revision, qr_token = invitation
+        self.assertEqual(revision, first.pairing_revision)
+
+        prepared = self.lifecycle.prepare_pairing("qr", qr_token)
+        self.assertIsNotNone(prepared)
+        assert prepared is not None
+        self.assertTrue(self.lifecycle.commit_pairing(prepared))
+
+        second = self.lifecycle.snapshot()
+        self.assertEqual(second.pairing_revision, first.pairing_revision + 1)
+        self.assertNotEqual(second.pairing_code, first.pairing_code)
+        self.assertIsNone(self.lifecycle.prepare_pairing("qr", qr_token))
+        self.assertIsNone(self.lifecycle.prepare_pairing("code", first.pairing_code))
+
+    def test_stopped_session_rejects_prepared_pairing_commit(self) -> None:
+        prepared = self.lifecycle.prepare_pairing("code", self.lifecycle.pairing_code)
+        self.assertIsNotNone(prepared)
+        assert prepared is not None
+        self.lifecycle.stop("manual_stop")
+        self.assertFalse(self.lifecycle.commit_pairing(prepared))
+        self.assertIsNone(self.lifecycle.pairing_invitation())
+
     def test_expiry_without_transfer_requests_close(self) -> None:
         self.clock.advance(300)
         snapshot = self.lifecycle.snapshot()
@@ -97,6 +124,18 @@ class SessionLifecycleTests(unittest.TestCase):
         self.assertEqual(statistics["completed_downloads"], 1)
         self.assertEqual(statistics["completed_download_streams"], 8)
         self.assertEqual(statistics["downloaded_mb"], 0.001)
+        self.assertEqual(self.lifecycle.download_task_status("download-1"), "completed")
+
+    def test_download_task_status_allows_range_retries_before_completion(self) -> None:
+        self.lifecycle.register_download("download-1", 100)
+        self.assertEqual(self.lifecycle.download_task_status("download-1"), "pending")
+        stream = self.lifecycle.begin_transfer(
+            "download", download_id="download-1", expected_size=100
+        )
+        self.assertEqual(self.lifecycle.download_task_status("download-1"), "active")
+        stream.add_bytes(25)
+        stream.fail("client_disconnect")
+        self.assertEqual(self.lifecycle.download_task_status("download-1"), "waiting_retry")
 
     def test_parallel_range_failures_count_as_one_logical_download(self) -> None:
         self.lifecycle.register_download("download-1", 1_000)

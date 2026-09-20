@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 from io import BytesIO
+import json
 from pathlib import Path
 import re
+import threading
 import unittest
+from unittest.mock import patch
 from urllib.parse import quote, urlencode
 from wsgiref.util import setup_testing_defaults
 
@@ -60,6 +63,11 @@ class BottleApplicationTests(unittest.TestCase):
         csrf = match.group(1)
         self.assertIn("/upload/raw", decoded)
         self.assertIn("xhr.upload.addEventListener('progress'", decoded)
+        self.assertIn('type="file" name="file" multiple', decoded)
+        self.assertIn('class="download-choice"', decoded)
+        self.assertIn('id="downloadSelected"', decoded)
+        self.assertIn("runUploadQueue", decoded)
+        self.assertNotIn("new Blob", decoded)
 
         status, headers, body = wsgi_request(
             self.app, "/download/hello.txt", cookie=cookie
@@ -229,6 +237,145 @@ class BottleApplicationTests(unittest.TestCase):
         )
         self.assertTrue(status.startswith("403"))
 
+    def test_qr_landing_clears_fragment_before_posting_in_memory_token(self) -> None:
+        status, headers, body = wsgi_request(self.app, "/pair/qr")
+        decoded = body.decode()
+        self.assertTrue(status.startswith("200"), status)
+        self.assertEqual(headers["Cache-Control"], "no-store")
+        self.assertEqual(headers["Referrer-Policy"], "no-referrer")
+        read_index = decoded.index("window.location.hash")
+        save_index = decoded.index("const qrToken")
+        clear_index = decoded.index("history.replaceState")
+        post_index = decoded.index("fetch('/pair/qr'")
+        self.assertLess(read_index, save_index)
+        self.assertLess(save_index, clear_index)
+        self.assertLess(clear_index, post_index)
+
+    def test_qr_pairing_sets_trust_and_rotates_qr_and_code_together(self) -> None:
+        original = self.lifecycle.snapshot()
+        invitation = self.lifecycle.pairing_invitation()
+        self.assertIsNotNone(invitation)
+        assert invitation is not None
+        old_qr = invitation[2]
+        form = urlencode({"token": old_qr}).encode()
+
+        status, headers, _body = wsgi_request(
+            self.app,
+            "/pair/qr",
+            method="POST",
+            body=form,
+            content_type="application/x-www-form-urlencoded",
+        )
+
+        self.assertTrue(status.startswith("303"), status)
+        self.assertIn("HttpOnly", headers["Set-Cookie"])
+        current = self.lifecycle.snapshot()
+        self.assertEqual(current.pairing_revision, original.pairing_revision + 1)
+        self.assertNotEqual(current.pairing_code, original.pairing_code)
+        self.assertIsNone(self.lifecycle.prepare_pairing("qr", old_qr))
+        self.assertEqual(len(self.store.list_clients()), 1)
+
+    def test_manual_pairing_invalidates_qr_and_qr_pairing_invalidates_code(self) -> None:
+        invitation = self.lifecycle.pairing_invitation()
+        self.assertIsNotNone(invitation)
+        assert invitation is not None
+        old_qr = invitation[2]
+        old_code = self.lifecycle.pairing_code
+        form = urlencode({"code": old_code}).encode()
+        status, _headers, _body = wsgi_request(
+            self.app,
+            "/pair",
+            method="POST",
+            body=form,
+            content_type="application/x-www-form-urlencoded",
+        )
+        self.assertTrue(status.startswith("303"), status)
+        status, _headers, _body = wsgi_request(
+            self.app,
+            "/pair/qr",
+            method="POST",
+            body=urlencode({"token": old_qr}).encode(),
+            content_type="application/x-www-form-urlencoded",
+        )
+        self.assertTrue(status.startswith("403"), status)
+
+        second_code = self.lifecycle.pairing_code
+        second_qr = self.lifecycle.pairing_invitation()[2]  # type: ignore[index]
+        status, _headers, _body = wsgi_request(
+            self.app,
+            "/pair/qr",
+            method="POST",
+            body=urlencode({"token": second_qr}).encode(),
+            content_type="application/x-www-form-urlencoded",
+        )
+        self.assertTrue(status.startswith("303"), status)
+        self.assertIsNone(self.lifecycle.prepare_pairing("code", second_code))
+
+    def test_trusted_client_qr_visit_does_not_consume_invitation(self) -> None:
+        _client, credential = self.store.issue("Already trusted")
+        cookie = f"landrop_trust={credential}"
+        before = self.lifecycle.pairing_invitation()
+
+        for method in ("GET", "POST"):
+            status, _headers, _body = wsgi_request(
+                self.app,
+                "/pair/qr",
+                method=method,
+                body=b"token=wrong" if method == "POST" else b"",
+                content_type="application/x-www-form-urlencoded" if method == "POST" else "",
+                cookie=cookie,
+            )
+            self.assertTrue(status.startswith("303"), status)
+        self.assertEqual(self.lifecycle.pairing_invitation(), before)
+        self.assertEqual(self.lifecycle.snapshot().paired_devices, 0)
+
+    def test_concurrent_qr_use_allows_exactly_one_new_client(self) -> None:
+        invitation = self.lifecycle.pairing_invitation()
+        self.assertIsNotNone(invitation)
+        assert invitation is not None
+        body = urlencode({"token": invitation[2]}).encode()
+        barrier = threading.Barrier(3)
+        statuses: list[str] = []
+        status_lock = threading.Lock()
+
+        def submit() -> None:
+            barrier.wait()
+            status, _headers, _body = wsgi_request(
+                self.app,
+                "/pair/qr",
+                method="POST",
+                body=body,
+                content_type="application/x-www-form-urlencoded",
+            )
+            with status_lock:
+                statuses.append(status)
+
+        threads = [threading.Thread(target=submit) for _ in range(2)]
+        for thread in threads:
+            thread.start()
+        barrier.wait()
+        for thread in threads:
+            thread.join()
+
+        self.assertEqual(sum(status.startswith("303") for status in statuses), 1)
+        self.assertEqual(sum(status.startswith("403") for status in statuses), 1)
+        self.assertEqual(len(self.store.list_clients()), 1)
+
+    def test_failed_final_commit_rolls_back_trust_and_sets_no_cookie(self) -> None:
+        code = self.lifecycle.pairing_code
+        with patch.object(self.lifecycle, "commit_pairing", return_value=False):
+            status, headers, _body = wsgi_request(
+                self.app,
+                "/pair",
+                method="POST",
+                body=urlencode({"code": code}).encode(),
+                content_type="application/x-www-form-urlencoded",
+            )
+        self.assertTrue(status.startswith("503"), status)
+        self.assertNotIn("Set-Cookie", headers)
+        self.assertEqual(self.store.list_clients(), [])
+        self.assertEqual(self.lifecycle.pairing_code, code)
+
     def test_expired_session_rejects_new_request(self) -> None:
         now = [10.0]
         lifecycle = SessionLifecycle(5, 1, clock=lambda: now[0])
@@ -309,6 +456,26 @@ class BottleApplicationTests(unittest.TestCase):
         self.assertEqual(statistics["completed_downloads"], 2)
         self.assertEqual(statistics["completed_download_streams"], 3)
         self.assertEqual(statistics["downloaded_mb"], 0.00001)
+
+    def test_batch_ticket_preserves_valid_serialization_key(self) -> None:
+        _client, credential = self.store.issue("Test Browser")
+        cookie = f"landrop_trust={credential}"
+        status, _headers, ticket_body = wsgi_request(
+            self.app,
+            "/start-download/hello.txt",
+            cookie=cookie,
+            query_string="batch_id=0123456789abcdef",
+        )
+        self.assertTrue(status.startswith("200"))
+        self.assertIn("batch_id=0123456789abcdef", ticket_body.decode())
+        ticket = json.loads(ticket_body)
+        status, _headers, body = wsgi_request(
+            self.app,
+            ticket["status_url"],
+            cookie=cookie,
+        )
+        self.assertTrue(status.startswith("200"))
+        self.assertEqual(json.loads(body)["status"], "pending")
 
 
 def wsgi_request(

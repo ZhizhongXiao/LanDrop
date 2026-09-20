@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import threading
-from pathlib import Path
 from typing import Any, Callable
+
+from .resources import resource_path
 
 
 class TrayUnavailableError(RuntimeError):
@@ -35,7 +36,7 @@ class LanDropTray:
             from PIL import Image
         except ImportError as exc:
             raise TrayUnavailableError("缺少 pystray 或 Pillow。") from exc
-        icon_path = Path(__file__).resolve().parents[1] / "assets" / "LanDrop.ico"
+        icon_path = resource_path("assets/LanDrop-tray.ico")
         try:
             with Image.open(icon_path) as opened:
                 image = opened.convert("RGBA")

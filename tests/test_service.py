@@ -5,6 +5,7 @@ from pathlib import Path
 import threading
 import time
 import unittest
+from unittest.mock import patch
 
 from landrop.network import EndpointObservation
 from landrop.service import ServiceController, ServiceError
@@ -120,6 +121,34 @@ class ServiceControllerTests(unittest.TestCase):
         self.assertEqual(record["stop_reason"], "manual_stop")
         self.assertNotIn("pairing_code", record)
 
+    def test_qr_invitation_is_local_only_cached_and_cleared_on_stop(self) -> None:
+        self.controller.start(self.shared, self.received, 32)
+        lifecycle = self.controller._lifecycle
+        self.assertIsNotNone(lifecycle)
+        assert lifecycle is not None
+        secret = lifecycle.pairing_invitation()[2]  # type: ignore[index]
+        captured: list[str] = []
+
+        def render(url: str) -> str:
+            captured.append(url)
+            return "data:image/png;base64,test"
+
+        with patch("landrop.service.qr_png_data_uri", side_effect=render):
+            first = self.controller.pairing_qr_data_uri()
+            second = self.controller.pairing_qr_data_uri()
+
+        self.assertEqual(first, "data:image/png;base64,test")
+        self.assertEqual(second, first)
+        self.assertEqual(len(captured), 1)
+        self.assertEqual(
+            captured[0],
+            f"http://192.168.50.10:8000/pair/qr#{secret}",
+        )
+        self.assertNotIn(secret, str(self.controller.snapshot().to_dict()))
+
+        self.controller.stop()
+        self.assertEqual(self.controller.pairing_qr_data_uri(), "")
+
     def test_available_interfaces_returns_fresh_diagnostic_view(self) -> None:
         interfaces = self.controller.available_interfaces()
 
@@ -226,9 +255,9 @@ class ServiceControllerTests(unittest.TestCase):
             self.assertEqual(current.stop_reason, "manual_stop")
 
     def test_rejects_missing_directory_and_invalid_limit(self) -> None:
-        with self.assertRaisesRegex(ServiceError, "请选择共享目录"):
+        with self.assertRaisesRegex(ServiceError, "请选择下载来源目录"):
             self.controller.start("", self.received)
-        with self.assertRaisesRegex(ServiceError, "共享目录不存在"):
+        with self.assertRaisesRegex(ServiceError, "下载来源目录不存在"):
             self.controller.start(self.root / "missing", self.received)
         with self.assertRaisesRegex(ServiceError, "上传上限"):
             self.controller.start(self.shared, self.received, 0)

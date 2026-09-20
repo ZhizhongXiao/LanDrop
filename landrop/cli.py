@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import argparse
-import os
+import logging
 from pathlib import Path
 import sys
 import time
@@ -14,17 +14,17 @@ from .network import (
     format_interfaces,
 )
 from .service import ServiceController, ServiceError
+from .settings import (
+    DEFAULT_MAX_UPLOAD_MB,
+    SettingsError,
+    SettingsStore,
+    default_data_directory,
+)
 from .trust import CredentialStore
 
 
 DEFAULT_PORT = 8000
-DEFAULT_MAX_UPLOAD_MB = 1000
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-DEFAULT_SHARED_DIRECTORY = PROJECT_ROOT / "shared"
-DEFAULT_RECEIVE_DIRECTORY = PROJECT_ROOT / "received"
-DEFAULT_DATA_DIRECTORY = Path(
-    os.environ.get("LOCALAPPDATA") or PROJECT_ROOT / ".landrop-data"
-) / "LanDrop"
+DEFAULT_DATA_DIRECTORY = default_data_directory()
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -35,20 +35,20 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--shared-dir",
         type=Path,
-        default=DEFAULT_SHARED_DIRECTORY,
-        help="下载共享目录（默认：项目中的 shared 目录）",
+        default=None,
+        help="提供客户机下载的目录（默认：用户 Downloads\\LanDrop\\Shared）",
     )
     parser.add_argument(
         "--receive-dir",
         type=Path,
-        default=DEFAULT_RECEIVE_DIRECTORY,
-        help="上传接收目录（默认：项目中的 received 目录）",
+        default=None,
+        help="保存客户机上传文件的目录（默认：用户 Downloads\\LanDrop\\Received）",
     )
     parser.add_argument(
         "--max-upload-mb",
         type=int,
-        default=DEFAULT_MAX_UPLOAD_MB,
-        help=f"单文件上传上限 MB（默认：{DEFAULT_MAX_UPLOAD_MB}）",
+        default=None,
+        help=f"单文件上传上限 MB（未指定时读取配置，初始为 {DEFAULT_MAX_UPLOAD_MB}）",
     )
     parser.add_argument(
         "--interface",
@@ -76,11 +76,21 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
     args = build_parser().parse_args(argv)
     credentials = CredentialStore(DEFAULT_DATA_DIRECTORY)
     if args.trusted_clients or args.forget_trusted:
         return _manage_trusted_clients(args, credentials)
-    if not 1 <= args.max_upload_mb <= 10_000:
+    settings_store = SettingsStore(DEFAULT_DATA_DIRECTORY)
+    settings = settings_store.load()
+    if settings_store.last_warning:
+        print(f"警告：{settings_store.last_warning}", file=sys.stderr)
+    shared_option = args.shared_dir or settings.shared_directory
+    receive_option = args.receive_dir or settings.receive_directory
+    max_upload_mb = (
+        args.max_upload_mb if args.max_upload_mb is not None else settings.max_upload_mb
+    )
+    if not 1 <= max_upload_mb <= 10_000:
         print("错误：上传上限必须在 1 到 10000 MB 之间。", file=sys.stderr)
         return 2
     if not 5 <= args.session_seconds <= 86_400 or not 0 <= args.grace_seconds <= 600:
@@ -99,9 +109,10 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     try:
-        shared_directory = _existing_directory(args.shared_dir, "共享")
-        receive_directory = _existing_directory(args.receive_dir, "接收")
-    except (NetworkDiscoveryError, RuntimeError) as exc:
+        settings_store.ensure_default_directories(settings)
+        shared_directory = _existing_directory(shared_option, "下载来源")
+        receive_directory = _existing_directory(receive_option, "上传保存")
+    except (NetworkDiscoveryError, RuntimeError, SettingsError) as exc:
         print(f"无法启动：{exc}", file=sys.stderr)
         return 1
 
@@ -114,7 +125,7 @@ def main(argv: list[str] | None = None) -> int:
         state = controller.start(
             shared_directory,
             receive_directory,
-            args.max_upload_mb,
+            max_upload_mb,
             args.interface,
         )
     except ServiceError as exc:
@@ -123,9 +134,9 @@ def main(argv: list[str] | None = None) -> int:
 
     print()
     print("LanDrop 双向传输服务已启动")
-    print(f"下载目录：{shared_directory}")
-    print(f"接收目录：{receive_directory}")
-    print(f"上传上限：{args.max_upload_mb} MB")
+    print(f"提供下载的目录：{shared_directory}")
+    print(f"保存上传的目录：{receive_directory}")
+    print(f"上传上限：{max_upload_mb} MB")
     print(f"服务机本地访问：{state.local_url}")
     print(f"客户机访问：{state.lan_url}")
     network_name = (
@@ -198,7 +209,7 @@ def _manage_trusted_clients(args: argparse.Namespace, store: CredentialStore) ->
         if store.revoke(selector):
             print(f"已取消浏览器信任：{selector}")
             return 0
-        print(f"未找到可信客户端：{selector}", file=sys.stderr)
+        print(f"未找到可信客户机：{selector}", file=sys.stderr)
         return 1
     except RuntimeError as exc:
         print(str(exc), file=sys.stderr)

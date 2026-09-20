@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>安装 LanDrop</title>
+  <link rel="stylesheet" href="../desktop/css/tokens.css">
+  <link rel="stylesheet" href="../wizard/css/wizard.css">
+</head>
+<body>
+  <main class="wizard-shell">
+    <aside class="wizard-rail">
+      <button class="wizard-brand" type="button" data-theme-toggle aria-label="主题：跟随系统；点击切换为深色模式"><span class="wizard-brand-icon"><img src="../../assets/LanDrop-icon-preview.png" alt=""><span class="theme-indicator" data-theme-indicator aria-hidden="true">◐</span></span><span class="wizard-brand-copy"><strong>LanDrop</strong><span>安装向导</span></span></button>
+      <ol class="wizard-steps">
+        <li class="wizard-step active"><b>1</b><span>欢迎</span></li>
+        <li class="wizard-step"><b>2</b><span>安装选项</span></li>
+        <li class="wizard-step"><b>3</b><span>准备安装</span></li>
+      </ol>
+      <p class="rail-note">安装器沿用主程序的蓝色局域网视觉语言；正式系统集成将在第八阶段实现并验收。</p>
+    </aside>
+    <section class="wizard-main">
+      <div class="wizard-content">
+        <section class="wizard-page active">
+          <p class="wizard-kicker">WELCOME</p><h1>安装 LanDrop</h1>
+          <p class="wizard-lead">在 Windows 11 服务机上安装局域网文件收发工具。LanDrop 仅在你主动启动服务后开放 TCP 8000，并要求可信 Private 网络。</p>
+          <div class="preview-note">这是第七阶段的界面草图，不会修改系统、创建快捷方式或写入防火墙规则。</div>
+        </section>
+        <section class="wizard-page">
+          <p class="wizard-kicker">OPTIONS</p><h1>选择安装方式</h1>
+          <p class="wizard-lead">默认固定安装到当前用户目录；开机启动桌面程序，但不会自动开启传输服务。</p>
+          <div class="path-preview"><strong>安装位置</strong><span>%LOCALAPPDATA%\Programs\LanDrop</span></div>
+          <div class="choice-list">
+            <label class="choice"><input type="checkbox" checked><span><strong>创建开始菜单快捷方式</strong><small>用于打开 LanDrop 主窗口。</small></span></label>
+            <label class="choice"><input type="checkbox" checked><span><strong>登录后启动 LanDrop</strong><small>仅驻留托盘，不自动开放文件传输服务。</small></span></label>
+            <label class="choice"><input type="checkbox" checked><span><strong>注册 Windows 通知身份</strong><small>保证通知归属和动作回调稳定。</small></span></label>
+          </div>
+        </section>
+        <section class="wizard-page">
+          <p class="wizard-kicker">READY</p><h1>准备安装</h1>
+          <p class="wizard-lead">确认后，第八阶段的正式安装器将复制程序文件并注册你已选择的系统入口。</p>
+          <div class="summary-list">
+            <div class="summary-row"><strong>范围</strong><span>当前用户</span></div>
+            <div class="summary-row"><strong>开机行为</strong><span>启动桌面程序，传输服务保持关闭</span></div>
+            <div class="summary-row"><strong>防火墙</strong><span>策略将在第八阶段独立确认</span></div>
+          </div>
+          <div id="previewResult" class="preview-note">尚未执行安装。</div>
+        </section>
+      </div>
+      <footer class="wizard-footer"><span class="wizard-version">LanDrop · 安装器视觉草图</span><div class="footer-actions"><button id="back" class="wizard-button" type="button">返回</button><button id="next" class="wizard-button primary" type="button">继续</button></div></footer>
+    </section>
+  </main>
+  <script src="../shared/js/theme.js"></script>
+  <script src="../wizard/js/wizard.js"></script>
+  <script src="js/setup.js"></script>
+</body>
+</html>

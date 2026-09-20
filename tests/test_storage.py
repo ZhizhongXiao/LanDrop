@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 from io import BytesIO
+import os
 from pathlib import Path
+import time
 import unittest
 
 from landrop.storage import (
+    cleanup_orphaned_upload_parts,
     InvalidFilenameError,
     UploadTooLargeError,
     resolve_shared_file,
@@ -54,6 +57,31 @@ class UploadTests(unittest.TestCase):
             root = Path(temporary)
             with self.assertRaises(InvalidFilenameError):
                 resolve_shared_file(root, "../secret.txt")
+
+    def test_orphan_cleanup_only_removes_exact_direct_child_pattern(self) -> None:
+        with temporary_directory() as temporary:
+            root = Path(temporary)
+            orphan = root / f".movie.bin.{'a' * 24}.part"
+            fresh_matching = root / f".active.bin.{'c' * 24}.part"
+            arbitrary = root / "user-download.part"
+            wrong_token = root / ".movie.bin.not-a-token.part"
+            nested = root / "nested"
+            nested.mkdir()
+            nested_orphan = nested / f".nested.bin.{'b' * 24}.part"
+            for path in (orphan, fresh_matching, arbitrary, wrong_token, nested_orphan):
+                path.write_bytes(b"partial")
+            old = time.time() - 25 * 60 * 60
+            os.utime(orphan, (old, old))
+
+            result = cleanup_orphaned_upload_parts(root)
+
+            self.assertEqual(result.removed, 1)
+            self.assertEqual(result.errors, ())
+            self.assertFalse(orphan.exists())
+            self.assertTrue(fresh_matching.exists())
+            self.assertTrue(arbitrary.exists())
+            self.assertTrue(wrong_token.exists())
+            self.assertTrue(nested_orphan.exists())
 
 
 if __name__ == "__main__":

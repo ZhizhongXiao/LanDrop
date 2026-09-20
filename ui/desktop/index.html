@@ -1,0 +1,244 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>LanDrop</title>
+  <link rel="stylesheet" href="css/tokens.css">
+  <link rel="stylesheet" href="css/shell.css">
+  <link rel="stylesheet" href="css/components.css">
+</head>
+<body data-service-state="stopped">
+  <div class="ambient ambient-one"></div>
+  <div class="ambient ambient-two"></div>
+
+  <main class="app-shell">
+    <aside class="activity-rail" aria-label="主导航">
+      <button class="rail-brand" type="button" data-theme-toggle aria-label="主题：跟随系统；点击切换为深色模式">
+        <img src="../../assets/LanDrop-icon-preview.png" alt="">
+        <span class="theme-indicator" data-theme-indicator aria-hidden="true">◐</span>
+      </button>
+      <nav class="tab-bar" aria-label="LanDrop 页面">
+        <button class="tab active" type="button" data-page="mainPage" data-title="传输控制" data-subtitle="在可信局域网内临时开放文件收发服务" aria-label="主控" aria-current="page">
+          <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M4 5.5h16v11H4z"></path><path d="M8 20h8M12 16.5V20"></path><path d="M8 11h8M13 8l3 3-3 3"></path></svg>
+          <span class="nav-tooltip">主控</span>
+        </button>
+        <button class="tab" type="button" data-page="infoPage" data-title="网络与诊断" data-subtitle="检查本次 endpoint、Windows 网络和防火墙证据" aria-label="信息">
+          <svg aria-hidden="true" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"></circle><path d="M12 10.5v6M12 7.5h.01"></path></svg>
+          <span class="nav-tooltip">信息</span>
+        </button>
+      </nav>
+      <nav class="rail-settings" aria-label="辅助导航">
+        <button class="tab" type="button" data-page="settingsPage" data-title="设置与恢复" data-subtitle="只读诊断、日志入口和 Windows 官方设置" aria-label="设置">
+          <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M12 3.5a2 2 0 0 1 2 2v.4a7 7 0 0 1 1.4.8l.4-.2a2 2 0 0 1 2.7.7l.9 1.6a2 2 0 0 1-.7 2.7l-.4.2v1.6l.4.2a2 2 0 0 1 .7 2.7l-.9 1.6a2 2 0 0 1-2.7.7l-.4-.2a7 7 0 0 1-1.4.8v.4a2 2 0 0 1-2 2h-1.8a2 2 0 0 1-2-2v-.4a7 7 0 0 1-1.4-.8l-.4.2a2 2 0 0 1-2.7-.7L4 16.2a2 2 0 0 1 .7-2.7l.4-.2v-1.6l-.4-.2A2 2 0 0 1 4 8.8l.9-1.6a2 2 0 0 1 2.7-.7l.4.2a7 7 0 0 1 1.4-.8v-.4a2 2 0 0 1 2-2Z"></path><circle cx="12" cy="12.5" r="2.5"></circle></svg>
+          <span class="nav-tooltip">设置</span>
+        </button>
+      </nav>
+    </aside>
+
+    <div class="workspace-column">
+      <header class="hero">
+        <div>
+          <p class="eyebrow">LANDROP · PRIVATE LAN</p>
+          <h1 id="workspaceTitle">传输控制</h1>
+          <p id="workspaceSubtitle" class="subtitle">在可信局域网内临时开放文件收发服务</p>
+        </div>
+        <span id="badge" class="status-pill"><span class="status-dot"></span><span class="status-text">已停止</span></span>
+      </header>
+
+      <section id="mainPage" class="page active" aria-label="传输控制">
+        <section class="service-panel panel">
+          <header class="panel-heading service-heading">
+            <div>
+              <p class="section-index">CURRENT SESSION</p>
+              <h2>本次传输会话</h2>
+              <p id="message" class="panel-description">服务未启动</p>
+            </div>
+            <div class="countdown-block">
+              <span>剩余时间</span>
+              <strong id="countdown" class="countdown">—</strong>
+            </div>
+          </header>
+
+          <div class="session-grid">
+            <article class="qr-card">
+              <span class="metric-label">扫码连接（首选）</span>
+              <button id="openQrDialog" class="qr-frame" type="button" aria-label="放大一次性客户机邀请二维码" disabled>
+                <img id="pairingQr" alt="一次性客户机邀请二维码" hidden>
+                <span id="qrUnavailable">启动服务后显示</span>
+              </button>
+              <small>扫码后自动配对；点击可放大</small>
+            </article>
+            <article class="pairing-card">
+              <span class="metric-label">8 位配对码（备用）</span>
+              <strong id="pairing" class="code">—</strong>
+              <small>只向当前可信局域网中的客户机提供</small>
+            </article>
+            <article class="session-addresses">
+              <div><span>客户机访问</span><strong id="lanUrl">—</strong></div>
+              <div><span>监听网络</span><strong id="network">—</strong></div>
+            </article>
+          </div>
+
+          <div class="command-bar">
+            <button id="start" class="button primary" type="button">启动服务</button>
+            <button id="stop" class="button danger" type="button" disabled>停止服务</button>
+            <button id="resetDeadline" class="button secondary" type="button" disabled>重置为 5 分钟</button>
+          </div>
+          <div id="notice" class="notice" aria-live="polite"></div>
+        </section>
+
+        <div class="overview-grid">
+          <section class="panel overview-card transfer-overview">
+            <div class="overview-card-copy"><p class="section-index">TRANSFER SETTINGS</p><h2>传输设置</h2><p>选择监听网络、提供下载的目录、保存上传的目录和单文件上传上限。</p></div>
+            <div class="settings-preview" aria-label="当前传输设置预览">
+              <div><span>监听网络</span><strong id="settingsPreviewNetwork">—</strong></div>
+              <div><span>提供下载</span><strong id="settingsPreviewShared">—</strong></div>
+              <div><span>保存上传</span><strong id="settingsPreviewReceived">—</strong></div>
+            </div>
+            <button id="openTransferSettingsCard" class="button secondary" type="button">进入设置</button>
+          </section>
+          <section class="panel overview-card">
+            <div class="overview-card-copy"><p class="section-index">TRUSTED CLIENTS</p><h2>可信客户机</h2><p>查看已配对浏览器，并在需要时撤销信任。</p><div class="overview-card-metrics"><span><strong id="paired">0</strong>可信客户机</span><span><strong id="active">0</strong>活动请求流</span></div></div>
+            <button id="openTrustedClients" class="button secondary" type="button">管理</button>
+          </section>
+        </div>
+
+      </section>
+
+      <dialog id="qrDialog" class="qr-dialog" aria-labelledby="qrDialogTitle">
+        <form method="dialog" class="qr-dialog-card">
+          <button class="qr-dialog-close" type="submit" aria-label="关闭二维码放大视图">×</button>
+          <p class="section-index">ONE-TIME INVITATION</p>
+          <h2 id="qrDialogTitle">扫码连接 LanDrop</h2>
+          <p>请使用同一 Private LAN 中的客户机扫描；成功配对后本邀请立即失效。</p>
+          <div class="qr-dialog-image"><img id="pairingQrLarge" alt="放大的一次性客户机邀请二维码"></div>
+          <small>二维码只在本机生成，不会发送到在线识别服务。</small>
+        </form>
+      </dialog>
+
+      <section id="transferSettingsPage" class="page" data-parent-page="mainPage" data-title="传输设置" data-subtitle="选择本次服务使用的目录、上传上限和 Private 网络">
+        <section class="panel configuration-panel">
+          <header class="panel-heading">
+            <div><p class="section-index">DIRECTORIES & NETWORK</p><h2>目录与监听网络</h2><p class="panel-description">服务运行期间仅供查看；停止服务后才能修改并保存。</p></div>
+            <button id="returnMainFromTransferSettings" class="button ghost compact" type="button">返回主控</button>
+          </header>
+            <label for="shared">提供下载的目录 <small>客户机从此处下载</small></label>
+            <div class="path-row">
+              <input id="shared" autocomplete="off">
+              <button class="button secondary chooser" type="button" data-target="shared">选择…</button>
+            </div>
+
+            <label for="received">保存上传的目录 <small>客户机上传到此处</small></label>
+            <div class="path-row">
+              <input id="received" autocomplete="off">
+              <button class="button secondary chooser" type="button" data-target="received">选择…</button>
+            </div>
+
+            <div class="field-grid">
+              <label for="limit">单文件上传上限（MB）<input id="limit" type="number" min="1" max="10000" value="1000"></label>
+              <label for="interfaceSelector">监听网络
+                <span class="select-row">
+                  <select id="interfaceSelector"><option value="">自动选择（仅一个可用 Private 网络）</option></select>
+                  <button id="refreshInterfaces" class="icon-button" type="button" title="刷新网络" aria-label="刷新网络">↻</button>
+                </span>
+              </label>
+            </div>
+            <div class="configuration-actions"><button id="saveSettings" class="button secondary" type="button">保存设置</button></div>
+        </section>
+      </section>
+
+      <section id="trustedClientsPage" class="page" data-parent-page="mainPage" data-title="可信客户机" data-subtitle="查看已配对浏览器，并撤销不再信任的客户机">
+        <section class="panel clients-panel">
+          <header class="panel-heading">
+            <div><p class="section-index">TRUSTED CLIENTS</p><h2>可信客户机</h2><p class="panel-description">配对后可在有效凭据范围内再次连接；你可以随时撤销。</p></div>
+            <div class="heading-actions">
+              <button id="returnMainFromClients" class="button ghost compact" type="button">返回主控</button>
+              <button id="refreshClients" class="button ghost compact" type="button">刷新列表</button>
+              <button id="revokeAll" class="button danger-outline compact" type="button">撤销全部信任</button>
+            </div>
+          </header>
+          <div id="clients" class="clients"><span class="subtitle">正在读取…</span></div>
+        </section>
+      </section>
+
+      <section id="infoPage" class="page" aria-label="网络与诊断">
+        <section class="panel">
+          <header class="panel-heading"><div><p class="section-index">ENDPOINT BASELINE</p><h2>当前服务机网络基线</h2></div></header>
+          <dl class="status-grid">
+            <div><dt>服务端绑定基线</dt><dd id="endpointSummary">—</dd></div>
+            <div><dt>服务端网络校验</dt><dd id="endpointHealth">—</dd></div>
+            <div><dt>诊断状态</dt><dd id="diagnosticStatus">尚未检测</dd></div>
+            <div><dt>服务端监听地址</dt><dd id="listenSummary">—</dd></div>
+            <div><dt>传输摘要</dt><dd id="transferSummary">—</dd></div>
+          </dl>
+        </section>
+
+        <section class="panel statistics-panel">
+          <header class="panel-heading"><div><p class="section-index">TRANSFER SUMMARY</p><h2>本次会话统计</h2><p class="panel-description">供排查传输结果时查看，不影响服务控制。</p></div></header>
+          <dl class="compact-list">
+            <div><dt>下载文件任务</dt><dd id="downloadStatistics">—</dd></div>
+            <div><dt>上传文件任务</dt><dd id="uploadStatistics">—</dd></div>
+            <div><dt>累计传输</dt><dd id="statistics">—</dd></div>
+            <div><dt>下载请求流</dt><dd id="streamStatistics">—</dd></div>
+            <div><dt>停止原因</dt><dd id="stopReason">—</dd></div>
+            <div><dt>失败分类</dt><dd id="failureReasons">—</dd></div>
+            <div><dt>拒绝分类</dt><dd id="rejectionReasons">—</dd></div>
+          </dl>
+        </section>
+
+        <details id="diagnosticDetails" class="panel diagnostic-details">
+          <summary><span><small>READ-ONLY DETAILS</small><strong>查看详细诊断</strong></span><b>＋</b></summary>
+          <div class="diagnostic-sections">
+            <section>
+              <header><h2>服务机 IPv4 接口</h2><p>回环与排除项用于解释，不会成为 LAN endpoint。</p></header>
+              <div id="interfaceList" class="diagnostic-list"><span class="subtitle">尚未检测。</span></div>
+            </section>
+            <section>
+              <header><h2>服务机网络详细信息</h2><p>DNS、网关和链路信息只用于诊断。</p></header>
+              <div id="adapterDetails" class="diagnostic-list"><span class="subtitle">正在等待异步诊断。</span></div>
+            </section>
+            <section>
+              <header><h2>Windows 防火墙</h2><p>LanDrop 只读检查，不创建或修改规则。</p></header>
+              <div id="firewallSummary" class="diagnostic-unknown">尚未检测。</div>
+              <div id="firewallEvidence" class="diagnostic-list"></div>
+            </section>
+          </div>
+        </details>
+      </section>
+
+      <section id="settingsPage" class="page" aria-label="设置与恢复">
+        <section class="panel">
+          <header class="panel-heading"><div><p class="section-index">DIAGNOSTICS</p><h2>诊断与恢复</h2><p class="panel-description">只刷新 LanDrop 自身的只读信息，不会改变网络、防火墙、代理或 VPN。</p></div></header>
+          <div class="action-list">
+            <button id="refreshDiagnostics" class="list-action primary-action" type="button"><span><strong>重新检测</strong><small>异步读取网络与防火墙状态</small></span><b>↻</b></button>
+            <button id="viewDiagnostics" class="list-action" type="button"><span><strong>查看详细诊断</strong><small>前往信息页展开完整结果</small></span><b>→</b></button>
+            <button id="openLogs" class="list-action" type="button"><span><strong>打开日志文件夹</strong><small>查看普通诊断与异常记录</small></span><b>↗</b></button>
+            <button id="copyDiagnostics" class="list-action" type="button"><span><strong>复制诊断信息</strong><small>不包含配对码、凭据或收发目录</small></span><b>⧉</b></button>
+          </div>
+          <div id="settingsNotice" class="notice" aria-live="polite"></div>
+        </section>
+
+        <section class="panel">
+          <header class="panel-heading"><div><p class="section-index">WINDOWS SETTINGS</p><h2>Windows 设置入口</h2><p class="panel-description">是否修改系统配置始终由你决定。</p></div></header>
+          <div class="action-list three-columns">
+            <button class="list-action settings-link" type="button" data-target="network"><span><strong>网络设置</strong><small>网络类别与适配器</small></span><b>↗</b></button>
+            <button class="list-action settings-link" type="button" data-target="firewall"><span><strong>防火墙设置</strong><small>允许的应用和规则</small></span><b>↗</b></button>
+            <button class="list-action settings-link" type="button" data-target="proxy"><span><strong>代理设置</strong><small>系统代理与脚本</small></span><b>↗</b></button>
+          </div>
+        </section>
+
+        <section class="panel about-panel">
+          <header class="panel-heading"><div><p class="section-index">ABOUT</p><h2>关于 LanDrop</h2></div></header>
+          <div class="about-row"><span>当前版本</span><strong>LanDrop 0.6.0 · Windows 11</strong></div>
+        </section>
+      </section>
+    </div>
+  </main>
+
+  <script src="../shared/js/theme.js"></script>
+  <script src="js/state.js"></script>
+  <script src="js/app.js"></script>
+</body>
+</html>
