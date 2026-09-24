@@ -189,6 +189,81 @@ class SystemIntegrationTests(unittest.TestCase):
                 backend.assert_absent(plan)
             self.assertFalse(registry.keys)
 
+    def test_upgrade_changes_only_registration_version_and_size(self) -> None:
+        with temporary_directory() as temporary:
+            paths = self._paths(Path(temporary))
+            shortcuts = _Shortcuts()
+            registry = _Registry()
+            backend = WindowsFirstInstallIntegration(shortcuts, registry_module=registry)
+            plan_a = IntegrationPlan.create(
+                paths,
+                version="1.0.0",
+                estimated_size_kib=100,
+                desktop_enabled=True,
+            )
+            backend.write(plan_a)
+            snapshot = backend.snapshot(plan_a)
+            shortcuts_before = dict(shortcuts.values)
+            run_before = registry.keys[RUN_KEY][RUN_VALUE_NAME]
+
+            backend.update_registration(
+                snapshot,
+                version="2.0.0",
+                estimated_size_kib=250,
+            )
+            backend.verify_upgrade(
+                snapshot,
+                version="2.0.0",
+                estimated_size_kib=250,
+            )
+
+            self.assertEqual(shortcuts.values, shortcuts_before)
+            self.assertEqual(registry.keys[RUN_KEY][RUN_VALUE_NAME], run_before)
+            self.assertEqual(
+                registry.keys[UNINSTALL_KEY]["DisplayVersion"][0],
+                "2.0.0",
+            )
+            self.assertEqual(registry.keys[UNINSTALL_KEY]["EstimatedSize"][0], 250)
+
+            backend.restore_upgrade(snapshot)
+            self.assertEqual(
+                registry.keys[UNINSTALL_KEY]["DisplayVersion"][0],
+                "1.0.0",
+            )
+            self.assertEqual(registry.keys[UNINSTALL_KEY]["EstimatedSize"][0], 100)
+
+    def test_upgrade_preserves_deleted_run_and_absent_desktop(self) -> None:
+        with temporary_directory() as temporary:
+            paths = self._paths(Path(temporary))
+            shortcuts = _Shortcuts()
+            registry = _Registry()
+            backend = WindowsFirstInstallIntegration(shortcuts, registry_module=registry)
+            plan_a = IntegrationPlan.create(
+                paths,
+                version="1.0.0",
+                estimated_size_kib=100,
+                desktop_enabled=False,
+            )
+            backend.write(plan_a)
+            registry.DeleteValue(_Key(registry, RUN_KEY), RUN_VALUE_NAME)
+            snapshot = backend.snapshot(plan_a)
+            self.assertIsNone(snapshot.run_command)
+            self.assertIsNone(snapshot.desktop_shortcut)
+
+            backend.update_registration(
+                snapshot,
+                version="2.0.0",
+                estimated_size_kib=200,
+            )
+            backend.verify_upgrade(
+                snapshot,
+                version="2.0.0",
+                estimated_size_kib=200,
+            )
+
+            self.assertNotIn(RUN_VALUE_NAME, registry.keys[RUN_KEY])
+            self.assertNotIn(paths.desktop_shortcut, shortcuts.values)
+
     @unittest.skipUnless(os.name == "nt", "Windows shortcut integration")
     def test_powershell_shortcut_bridge_writes_reads_aumid_and_removes(self) -> None:
         with temporary_directory() as temporary:

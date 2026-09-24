@@ -205,6 +205,92 @@ class FirstInstallIntegration(Protocol):
     def rollback(self, plan: IntegrationPlan) -> None: ...
 
 
+@dataclass(frozen=True, slots=True)
+class UpgradeIntegrationSnapshot:
+    """Exact pre-upgrade values that Setup must preserve or restore."""
+
+    start_menu_shortcut: ShortcutSpec
+    desktop_shortcut_path: Path
+    desktop_shortcut: ShortcutSpec | None
+    run_command: str | None
+    registration: InstalledAppRegistration
+
+    def to_json(self) -> dict[str, object]:
+        return {
+            "schema_version": 1,
+            "start_menu_shortcut": self.start_menu_shortcut.to_bridge_json(),
+            "desktop_shortcut_path": str(self.desktop_shortcut_path),
+            "desktop_shortcut": (
+                None
+                if self.desktop_shortcut is None
+                else self.desktop_shortcut.to_bridge_json()
+            ),
+            "run_command": self.run_command,
+            "registration": self.registration.registry_values(),
+        }
+
+    @classmethod
+    def from_json(cls, raw: Mapping[str, object]) -> UpgradeIntegrationSnapshot:
+        expected = {
+            "schema_version",
+            "start_menu_shortcut",
+            "desktop_shortcut_path",
+            "desktop_shortcut",
+            "run_command",
+            "registration",
+        }
+        if set(raw) != expected or raw.get("schema_version") != 1:
+            raise SystemIntegrationError("升级系统集成快照 schema 不受支持。")
+        start_menu_raw = raw["start_menu_shortcut"]
+        desktop_raw = raw["desktop_shortcut"]
+        registration_raw = raw["registration"]
+        desktop_path = raw["desktop_shortcut_path"]
+        run_command = raw["run_command"]
+        if not isinstance(start_menu_raw, Mapping):
+            raise SystemIntegrationError("升级快照缺少开始菜单快捷方式。")
+        if desktop_raw is not None and not isinstance(desktop_raw, Mapping):
+            raise SystemIntegrationError("升级快照桌面快捷方式无效。")
+        if not isinstance(registration_raw, Mapping):
+            raise SystemIntegrationError("升级快照卸载登记无效。")
+        if not isinstance(desktop_path, str) or not desktop_path:
+            raise SystemIntegrationError("升级快照桌面快捷方式路径无效。")
+        if run_command is not None and not isinstance(run_command, str):
+            raise SystemIntegrationError("升级快照 HKCU Run 值无效。")
+        return cls(
+            start_menu_shortcut=ShortcutSpec.from_bridge_json(start_menu_raw),
+            desktop_shortcut_path=_absolute(Path(desktop_path), "桌面快捷方式路径"),
+            desktop_shortcut=(
+                None
+                if desktop_raw is None
+                else ShortcutSpec.from_bridge_json(desktop_raw)
+            ),
+            run_command=run_command,
+            registration=_registration_from_values(registration_raw),
+        )
+
+
+class UpgradeIntegration(Protocol):
+    def snapshot(self, plan: IntegrationPlan) -> UpgradeIntegrationSnapshot: ...
+
+    def update_registration(
+        self,
+        snapshot: UpgradeIntegrationSnapshot,
+        *,
+        version: str,
+        estimated_size_kib: int,
+    ) -> None: ...
+
+    def verify_upgrade(
+        self,
+        snapshot: UpgradeIntegrationSnapshot,
+        *,
+        version: str,
+        estimated_size_kib: int,
+    ) -> None: ...
+
+    def restore_upgrade(self, snapshot: UpgradeIntegrationSnapshot) -> None: ...
+
+
 class ShortcutBackend(Protocol):
     def read(self, path: Path) -> ShortcutSpec | None: ...
 
@@ -387,6 +473,84 @@ class WindowsFirstInstallIntegration:
         if errors:
             raise SystemIntegrationError("系统集成回滚不完整：" + "；".join(errors))
 
+    def snapshot(self, plan: IntegrationPlan) -> UpgradeIntegrationSnapshot:
+        """Validate a committed install and capture values without changing them."""
+        start_menu = self._shortcuts.read(plan.start_menu_shortcut.path)
+        if start_menu != plan.start_menu_shortcut:
+            raise SystemIntegrationError("开始菜单快捷方式与当前安装状态不一致。")
+        desktop = self._shortcuts.read(plan.desktop_shortcut.path)
+        if desktop is not None and desktop != plan.desktop_shortcut:
+            raise SystemIntegrationError("桌面快捷方式无法归属当前 LanDrop 安装。")
+        run_command = self._read_run()
+        if run_command is not None and run_command != plan.run_command:
+            raise SystemIntegrationError("HKCU Run 值不属于当前 LanDrop 安装。")
+        registration_raw = self._read_uninstall_raw()
+        if registration_raw is None:
+            raise SystemIntegrationError("缺少当前 LanDrop 卸载登记。")
+        registration = _registration_from_values(registration_raw)
+        if registration.display_version != plan.registration.display_version:
+            raise SystemIntegrationError("卸载登记版本与 install.json 不一致。")
+        expected = _registration_with_version_and_size(
+            plan.registration,
+            version=registration.display_version,
+            estimated_size_kib=registration.estimated_size_kib,
+        )
+        if registration != expected:
+            raise SystemIntegrationError("卸载登记稳定字段与当前安装不一致。")
+        return UpgradeIntegrationSnapshot(
+            start_menu_shortcut=start_menu,
+            desktop_shortcut_path=plan.desktop_shortcut.path,
+            desktop_shortcut=desktop,
+            run_command=run_command,
+            registration=registration,
+        )
+
+    def update_registration(
+        self,
+        snapshot: UpgradeIntegrationSnapshot,
+        *,
+        version: str,
+        estimated_size_kib: int,
+    ) -> None:
+        target = _registration_with_version_and_size(
+            snapshot.registration,
+            version=version,
+            estimated_size_kib=estimated_size_kib,
+        )
+        self._write_upgrade_registration(target)
+
+    def verify_upgrade(
+        self,
+        snapshot: UpgradeIntegrationSnapshot,
+        *,
+        version: str,
+        estimated_size_kib: int,
+    ) -> None:
+        if self._shortcuts.read(snapshot.start_menu_shortcut.path) != snapshot.start_menu_shortcut:
+            raise SystemIntegrationError("升级后开始菜单快捷方式发生变化。")
+        if self._shortcuts.read(snapshot.desktop_shortcut_path) != snapshot.desktop_shortcut:
+            raise SystemIntegrationError("升级后桌面快捷方式选择发生变化。")
+        if self._read_run() != snapshot.run_command:
+            raise SystemIntegrationError("升级后 HKCU Run 状态发生变化。")
+        expected_registration = _registration_with_version_and_size(
+            snapshot.registration,
+            version=version,
+            estimated_size_kib=estimated_size_kib,
+        )
+        if self._read_uninstall_raw() != expected_registration.registry_values():
+            raise SystemIntegrationError("升级后卸载登记读回不一致。")
+
+    def restore_upgrade(self, snapshot: UpgradeIntegrationSnapshot) -> None:
+        self._write_upgrade_registration(snapshot.registration)
+        if self._shortcuts.read(snapshot.start_menu_shortcut.path) != snapshot.start_menu_shortcut:
+            raise SystemIntegrationError("恢复后开始菜单快捷方式不一致。")
+        if self._shortcuts.read(snapshot.desktop_shortcut_path) != snapshot.desktop_shortcut:
+            raise SystemIntegrationError("恢复后桌面快捷方式不一致。")
+        if self._read_run() != snapshot.run_command:
+            raise SystemIntegrationError("恢复后 HKCU Run 状态不一致。")
+        if self._read_uninstall_raw() != snapshot.registration.registry_values():
+            raise SystemIntegrationError("恢复后卸载登记不一致。")
+
     def _read_run(self) -> str | None:
         registry = self._registry
         try:
@@ -461,6 +625,32 @@ class WindowsFirstInstallIntegration:
                 value_type = registry.REG_DWORD if isinstance(value, int) else registry.REG_SZ
                 registry.SetValueEx(key, name, 0, value_type, value)
 
+    def _write_upgrade_registration(self, registration: InstalledAppRegistration) -> None:
+        registry = self._registry
+        try:
+            with registry.OpenKey(
+                registry.HKEY_CURRENT_USER,
+                UNINSTALL_KEY,
+                0,
+                registry.KEY_READ | registry.KEY_WRITE,
+            ) as key:
+                registry.SetValueEx(
+                    key,
+                    "DisplayVersion",
+                    0,
+                    registry.REG_SZ,
+                    registration.display_version,
+                )
+                registry.SetValueEx(
+                    key,
+                    "EstimatedSize",
+                    0,
+                    registry.REG_DWORD,
+                    registration.estimated_size_kib,
+                )
+        except FileNotFoundError as exc:
+            raise SystemIntegrationError("升级期间卸载登记已消失。") from exc
+
     def _remove_created_uninstall(self) -> None:
         registry = self._registry
         try:
@@ -499,6 +689,68 @@ def installed_size_kib(root: Path) -> int:
                 raise SystemIntegrationError(f"程序路径不是普通文件：{path}")
             total += details.st_size
     return max(1, (total + 1023) // 1024)
+
+
+def _registration_from_values(
+    values: Mapping[str, str | int],
+) -> InstalledAppRegistration:
+    expected = {
+        "DisplayName",
+        "DisplayVersion",
+        "Publisher",
+        "DisplayIcon",
+        "InstallLocation",
+        "UninstallString",
+        "EstimatedSize",
+        "NoModify",
+        "NoRepair",
+    }
+    if set(values) != expected:
+        raise SystemIntegrationError("卸载登记字段集合不符合冻结清单。")
+    text_fields = (
+        "DisplayName",
+        "DisplayVersion",
+        "Publisher",
+        "DisplayIcon",
+        "InstallLocation",
+        "UninstallString",
+    )
+    integer_fields = ("EstimatedSize", "NoModify", "NoRepair")
+    if any(not isinstance(values[name], str) for name in text_fields) or any(
+        isinstance(values[name], bool) or not isinstance(values[name], int)
+        for name in integer_fields
+    ):
+        raise SystemIntegrationError("卸载登记字段类型不符合冻结清单。")
+    return InstalledAppRegistration(
+        display_name=str(values["DisplayName"]),
+        display_version=str(values["DisplayVersion"]),
+        publisher=str(values["Publisher"]),
+        display_icon=str(values["DisplayIcon"]),
+        install_location=str(values["InstallLocation"]),
+        uninstall_string=str(values["UninstallString"]),
+        estimated_size_kib=int(values["EstimatedSize"]),
+        no_modify=int(values["NoModify"]),
+        no_repair=int(values["NoRepair"]),
+    )
+
+
+def _registration_with_version_and_size(
+    source: InstalledAppRegistration,
+    *,
+    version: str,
+    estimated_size_kib: int,
+) -> InstalledAppRegistration:
+    return InstalledAppRegistration(
+        display_name=source.display_name,
+        display_version=version,
+        publisher=source.publisher,
+        display_icon=source.display_icon,
+        install_location=source.install_location,
+        uninstall_string=source.uninstall_string,
+        estimated_size_kib=estimated_size_kib,
+        no_modify=source.no_modify,
+        no_repair=source.no_repair,
+    )
 
 
 def _absolute(path: Path, label: str) -> Path:

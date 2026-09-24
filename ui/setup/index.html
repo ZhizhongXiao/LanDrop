@@ -24,6 +24,7 @@
         <section class="wizard-page active">
           <p class="wizard-kicker">WELCOME</p><h1>安装 LanDrop</h1>
           <p class="wizard-lead">在 Windows 11 服务机上安装局域网文件收发工具。LanDrop 仅在你主动启动服务后开放 TCP 8000，并要求可信 Private 网络。</p>
+          <div id="setupModeMessage" class="preview-note">正在检查当前安装状态…</div>
           <div class="preview-note">安装前会验证 WebView2、完整 payload 和固定安装边界；失败时撤销本轮修改。</div>
         </section>
         <section class="wizard-page">
@@ -40,6 +41,7 @@
           <p class="wizard-kicker">READY</p><h1>准备安装</h1>
           <p class="wizard-lead">确认后将执行完整校验、文件提交、自检、系统集成读回与最终状态提交。</p>
           <div class="summary-list">
+            <div class="summary-row"><strong>操作</strong><span id="setupActionSummary">正在检查…</span></div>
             <div class="summary-row"><strong>范围</strong><span>当前用户</span></div>
             <div class="summary-row"><strong>开机行为</strong><span>启动桌面程序，传输服务保持关闭</span></div>
             <div class="summary-row"><strong>桌面快捷方式</strong><span id="desktopSummary">不创建</span></div>

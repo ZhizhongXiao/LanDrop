@@ -82,6 +82,11 @@ class InstallStateTests(unittest.TestCase):
             bad_cleanup = dict(base)
             bad_cleanup["pending_cleanup"] = ["../outside"]
             cases.append(bad_cleanup)
+            staging_cleanup = dict(base)
+            staging_cleanup["pending_cleanup"] = [
+                transaction_directory_name("staging", "0.8.0", "a" * 32)
+            ]
+            cases.append(staging_cleanup)
 
             for payload in cases:
                 with self.subTest(payload=payload):

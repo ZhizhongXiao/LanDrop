@@ -45,6 +45,10 @@ class _RecordingStateStore:
     def ensure_normal_start_allowed(self) -> None:
         self.events.append("transaction.check")
 
+    def read_install(self):
+        self.events.append("cleanup.check")
+        return None
+
 
 class DesktopStartupGateTests(unittest.TestCase):
     def _paths(self, root: Path) -> InstallPaths:
@@ -70,7 +74,13 @@ class DesktopStartupGateTests(unittest.TestCase):
             self.assertTrue(primary)
             self.assertEqual(
                 events,
-                ["lifecycle.acquire", "transaction.check", "desktop.acquire", "lifecycle.close"],
+                [
+                    "lifecycle.acquire",
+                    "transaction.check",
+                    "desktop.acquire",
+                    "cleanup.check",
+                    "lifecycle.close",
+                ],
             )
 
     def test_windows_startup_keeps_the_single_window_hidden_and_unfocused(self) -> None:

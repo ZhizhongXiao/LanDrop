@@ -4,6 +4,8 @@ const result = document.getElementById("previewResult");
 const desktop = document.getElementById("desktopShortcut");
 const desktopSummary = document.getElementById("desktopSummary");
 let pollTimer = null;
+let setupDisposition = "first_install";
+let setupBlockedMessage = "";
 
 function setResult(message, failed = false) {
   result.textContent = message;
@@ -20,6 +22,7 @@ function stageLabel(stage) {
     integration_write: "正在写入当前用户系统入口…",
     integration_verify: "正在读回验证系统入口…",
     commit: "正在提交 install.json…",
+    cleanup: "正在安全清理旧版本程序文件…",
     rollback: "安装失败，正在撤销本轮修改…",
     completed: "安装完成。"
   })[stage] || "正在安装…";
@@ -49,10 +52,14 @@ async function pollInstall(next, back) {
   };
 }
 
-createWizard({
+const wizardOptions = {
   finishLabel: "安装",
   onFinish: async ({ next, back }) => {
     if (next.dataset.started === "true") return;
+    if (["downgrade_blocked", "untrusted"].includes(setupDisposition)) {
+      setResult(setupBlockedMessage || "当前安装状态不允许继续。", true);
+      return;
+    }
     next.dataset.started = "true";
     next.disabled = true;
     back.disabled = true;
@@ -69,7 +76,9 @@ createWizard({
     }
     await pollInstall(next, back);
   }
-});
+};
+
+createWizard(wizardOptions);
 
 desktop.addEventListener("change", () => {
   desktopSummary.textContent = desktop.checked ? "创建" : "不创建";
@@ -83,6 +92,27 @@ window.addEventListener("pywebviewready", async () => {
   }
   document.getElementById("installRoot").textContent = status.install_root;
   document.getElementById("setupVersion").textContent = `LanDrop ${status.version} · Setup`;
-  desktop.checked = status.desktop_shortcut_default === true;
-  desktopSummary.textContent = desktop.checked ? "创建" : "不创建";
+  setupDisposition = status.disposition || "untrusted";
+  setupBlockedMessage = status.message || "当前安装状态无法继续。";
+  const firstInstall = setupDisposition === "first_install";
+  desktop.disabled = status.desktop_shortcut_enabled !== true;
+  desktop.checked = firstInstall && status.desktop_shortcut_default === true;
+  desktopSummary.textContent = firstInstall
+    ? (desktop.checked ? "创建" : "不创建")
+    : "保持当前状态";
+  const actionLabels = {
+    first_install: "安装",
+    upgrade: "升级",
+    already_installed: status.pending_cleanup?.length ? "重试清理" : "检查完成",
+    downgrade_blocked: "不可降级",
+    incomplete: "恢复并继续",
+    untrusted: "无法继续"
+  };
+  wizardOptions.finishLabel = actionLabels[setupDisposition] || "无法继续";
+  document.getElementById("setupModeMessage").textContent = status.message;
+  document.getElementById("setupActionSummary").textContent = firstInstall
+    ? `安装 LanDrop ${status.version}`
+    : setupDisposition === "upgrade"
+      ? `从 ${status.current_version} 升级到 ${status.version}`
+      : status.message;
 });

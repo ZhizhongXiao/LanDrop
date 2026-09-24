@@ -19,6 +19,7 @@ from .payload_manifest import PayloadManifest, read_payload_manifest, verify_pay
 from .platform_checks import webview2_runtime_version
 from .resources import resource_path
 from .system_integration import PowerShellShortcutBackend, WindowsFirstInstallIntegration
+from .upgrade import UpgradeOutcome, UpgradeService, inspect_setup_state
 
 
 class SetupBundleError(RuntimeError):
@@ -59,7 +60,7 @@ class SetupRuntime:
         self.paths = paths or _install_paths_with_windows_desktop()
         self.manifest = self.bundle.validate()
 
-    def create_service(self) -> FirstInstallService:
+    def _integration(self) -> WindowsFirstInstallIntegration:
         shortcut_backend = PowerShellShortcutBackend(
             (
                 self.paths.start_menu_shortcut,
@@ -67,12 +68,55 @@ class SetupRuntime:
             ),
             self.bundle.shortcut_bridge,
         )
-        integration = WindowsFirstInstallIntegration(shortcut_backend)
+        return WindowsFirstInstallIntegration(shortcut_backend)
+
+    def inspect(self):
+        return inspect_setup_state(self.paths, self.manifest)
+
+    def run(
+        self,
+        *,
+        desktop_shortcut: bool,
+        progress,
+    ) -> FirstInstallOutcome | UpgradeOutcome:
+        inspection = self.inspect()
+        integration = self._integration()
+        if inspection.disposition == "first_install":
+            service = FirstInstallService(
+                paths=self.paths,
+                payload_root=self.bundle.payload_root,
+                manifest=self.manifest,
+                integration=integration,
+            )
+            return service.install(
+                FirstInstallOptions(desktop_shortcut=desktop_shortcut),
+                progress=progress,
+            )
+        if inspection.disposition in {"upgrade", "already_installed", "incomplete"}:
+            service = UpgradeService(
+                paths=self.paths,
+                payload_root=self.bundle.payload_root,
+                manifest=self.manifest,
+                integration=integration,
+            )
+            return service.upgrade(progress=progress)
+        return UpgradeOutcome(
+            result="failed",
+            verified=False,
+            committed=False,
+            rollback_attempted=False,
+            rollback_succeeded=None,
+            cleanup_pending=False,
+            message=inspection.message,
+        )
+
+    def create_first_install_service(self) -> FirstInstallService:
+        """Compatibility helper retained for isolated Phase 8B tests."""
         return FirstInstallService(
             paths=self.paths,
             payload_root=self.bundle.payload_root,
             manifest=self.manifest,
-            integration=integration,
+            integration=self._integration(),
         )
 
 
@@ -91,11 +135,17 @@ class SetupApi:
         self._window = window
 
     def get_status(self) -> dict[str, object]:
+        inspection = self.runtime.inspect()
         return {
             "ok": True,
             "install_root": str(self.runtime.paths.install_root),
             "version": self.runtime.manifest.version,
             "desktop_shortcut_default": False,
+            "desktop_shortcut_enabled": inspection.disposition == "first_install",
+            "disposition": inspection.disposition,
+            "current_version": inspection.current_version,
+            "pending_cleanup": list(inspection.pending_cleanup),
+            "message": inspection.message,
         }
 
     def start_install(self, options: dict[str, object]) -> dict[str, object]:
@@ -122,13 +172,12 @@ class SetupApi:
 
     def _run_install(self, desktop_shortcut: bool) -> None:
         try:
-            service = self.runtime.create_service()
-            outcome = service.install(
-                FirstInstallOptions(desktop_shortcut=desktop_shortcut),
+            outcome = self.runtime.run(
+                desktop_shortcut=desktop_shortcut,
                 progress=self._set_stage,
             )
         except Exception as exc:
-            self._logger.exception("Unhandled first-install worker failure")
+            self._logger.exception("Unhandled Setup transaction worker failure")
             outcome = FirstInstallOutcome(
                 result="failed",
                 verified=False,
@@ -142,7 +191,7 @@ class SetupApi:
             self._operation["outcome"] = outcome.to_dict()
         if not outcome.verified:
             self._logger.error(
-                "First install failed: result=%s rollback_attempted=%s "
+                "Setup transaction failed: result=%s rollback_attempted=%s "
                 "rollback_succeeded=%s message=%s",
                 outcome.result,
                 outcome.rollback_attempted,
@@ -150,9 +199,9 @@ class SetupApi:
                 outcome.message,
             )
         elif outcome.warning:
-            self._logger.warning("First install completed with warning: %s", outcome.warning)
+            self._logger.warning("Setup transaction completed with warning: %s", outcome.warning)
         else:
-            self._logger.info("First install completed and verified")
+            self._logger.info("Setup transaction completed and verified")
         self._guard.release()
 
     def _set_stage(self, stage: str) -> None:

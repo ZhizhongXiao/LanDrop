@@ -386,8 +386,11 @@ def _install_record_from_json(raw: Mapping[str, object], paths: InstallPaths) ->
     pending = tuple(pending_raw)
     if len(set(pending)) != len(pending):
         raise InstallStateError("pending_cleanup 不能包含重复目录。")
-    if any(not is_transaction_directory_name(item) for item in pending):
-        raise InstallStateError("pending_cleanup 包含非受控事务目录名称。")
+    if any(
+        not item.startswith(".rollback-") or not is_transaction_directory_name(item)
+        for item in pending
+    ):
+        raise InstallStateError("pending_cleanup 只能包含受控 rollback 目录名称。")
     return InstallRecord(
         product_id=product_id,
         version=_required_text(raw["version"], "version"),

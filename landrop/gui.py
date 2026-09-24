@@ -33,6 +33,7 @@ from .single_instance import DesktopSingleInstance, SingleInstanceError
 from .storage import StorageError, cleanup_orphaned_upload_parts
 from .tray import LanDropTray, TrayUnavailableError
 from .trust import CredentialStore
+from .upgrade import retry_pending_cleanup
 
 
 class DesktopApi:
@@ -539,6 +540,7 @@ def _acquire_desktop_startup_ownership(
     lifecycle_lock: InstallLifecycleLock | None = None,
     state_store: InstallationStateStore | None = None,
     single_instance: DesktopSingleInstance | None = None,
+    cleanup_retry: Any | None = None,
 ) -> tuple[DesktopSingleInstance, bool]:
     """Pass the maintenance gate, then establish ordinary desktop ownership.
 
@@ -556,6 +558,11 @@ def _acquire_desktop_startup_ownership(
             raise InstallLifecycleLockError("LanDrop 正在安装、升级或卸载，请稍后重试。")
         state.ensure_normal_start_allowed()
         is_primary = desktop_instance.acquire()
+        if is_primary:
+            retry = cleanup_retry or (
+                lambda: retry_pending_cleanup(paths, state_store=state)
+            )
+            retry()
         return desktop_instance, is_primary
     except Exception:
         desktop_instance.close()
