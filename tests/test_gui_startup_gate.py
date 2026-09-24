@@ -73,6 +73,16 @@ class DesktopStartupGateTests(unittest.TestCase):
                 ["lifecycle.acquire", "transaction.check", "desktop.acquire", "lifecycle.close"],
             )
 
+    def test_windows_startup_keeps_the_single_window_hidden_and_unfocused(self) -> None:
+        self.assertEqual(
+            gui._desktop_window_visibility(True),
+            {"hidden": True, "focus": False},
+        )
+        self.assertEqual(
+            gui._desktop_window_visibility(False),
+            {"hidden": False, "focus": True},
+        )
+
     def test_transaction_residue_blocks_before_desktop_single_instance(self) -> None:
         with temporary_directory() as temporary:
             root = Path(temporary)

@@ -201,6 +201,14 @@ class InstallationStateStore:
         validated = _install_record_from_json(record.to_json(), self.paths)
         self._write_json(self.paths.install_state_path, validated.to_json())
 
+    def remove_install(self) -> None:
+        path = self.paths.install_state_path
+        self._validate_state_path(path)
+        try:
+            path.unlink(missing_ok=True)
+        except OSError as exc:
+            raise InstallStateError(f"无法删除 install.json：{exc}") from exc
+
     def read_transaction(self, *, required: bool = False) -> TransactionRecord | None:
         raw = self._read_json(
             self.paths.transaction_state_path,

@@ -23,10 +23,14 @@ function createWizard(options = {}) {
     render();
   });
 
-  next.addEventListener("click", () => {
+  next.addEventListener("click", async () => {
     if (current < pages.length - 1) {
       current += 1;
       render();
+      return;
+    }
+    if (typeof options.onFinish === "function") {
+      await options.onFinish({ back, next, current });
       return;
     }
     const note = document.getElementById("previewResult");
@@ -34,4 +38,5 @@ function createWizard(options = {}) {
   });
 
   render();
+  return { render, back, next };
 }

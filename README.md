@@ -12,8 +12,9 @@ LanDrop 是一个面向 Windows 11 服务机与浏览器客户机的轻量局域
 - 第四阶段 5 分钟生命周期、倒计时重置、传输宽限、可信客户机管理和会话统计已通过开发验收。
 - 第五阶段托盘、Windows 通知、旧通知隔离和统一退出已经实现，并通过 Windows 11 实机验收。
 - 第六阶段网络与防火墙诊断、冻结 endpoint 监测、PC↔PC Ethernet、分层性能基准和原始流上传已经通过人工与自动化验收。
-- 当前发布基线仍为 `0.6.0`；第七阶段“配置与用户目录、GUI/Web UI 定稿、便携打包与稳定性测试”正在实施，当前自动化回归已扩展到 94 项。
-- 第七阶段的本机实现与便携版回归已经完成；因第二台干净 Windows 11 电脑暂不可用，正式无开发环境验收延期。该外部验收不阻塞第八阶段开发，但必须在正式发布前与安装/卸载验收一并补齐。
+- 当前发布基线仍为 `0.6.0`；第七阶段开发验收已经通过，功能与本机便携回归基线冻结，当前自动化回归共 94 项。
+- 因第二台干净 Windows 11 电脑暂不可用，正式无开发环境验收作为明确的延后发布门槛保留。该门槛不阻塞第八阶段开发，但必须与首次安装、升级、卸载及系统状态恢复一并完成；在此之前不标记整个项目为发布验收完成。
+- 第八阶段正式分发采用单文件 `LanDrop-Setup.exe`；安装后的主程序保持 PyInstaller `--onedir`，独立 Setup/Uninstall 使用 `--onefile --windowed`。这样用户日常通过稳定快捷方式访问主程序，同时保留 onedir 已验证的启动与资源结构。
 - 公司等 `Public` 网络仍会拒绝启动。
 - 一次性 QR 客户机邀请已经实现并通过 Android 浏览器实扫验收；QR 主要面向手机，Windows 客户机优先直接输入访问地址。托盘由 `pystray` 提供，Windows 通知由 `Windows-Toasts` 提供。
 
@@ -83,7 +84,7 @@ LanDrop 是一个面向 Windows 11 服务机与浏览器客户机的轻量局域
 - 网络详细信息与防火墙证据由后台并行执行，统一设 10 秒硬超时；权限不足、查询卡顿或超时时只显示“无法确定”，不会阻塞端口启动。
 - IPv4 候选列表中的 `127.0.0.1` 是服务机内部回环地址，只用于服务机本地访问并明确排除为 LAN 候选；无 IPv4 的断开适配器（常见如 Wi-Fi Direct 的“本地连接*”和蓝牙 PAN）不会进入候选列表。LanDrop 只读检测，不会启用、禁用或修改这些适配器。
 
-第七阶段当前实现（待完整人工验收）：
+第七阶段冻结基线：
 
 - `%LOCALAPPDATA%\LanDrop\config.json` 只保存提供下载的目录、保存上传的目录和上传上限；损坏或非法配置会回退到安全默认值，不恢复 session、IPv4、倒计时或配对码。
 - 默认收发目录改为 Windows 实际 Downloads Known Folder 下的 `LanDrop\Shared` 与 `LanDrop\Received`，不再依赖源码目录、当前工作目录或 PyInstaller `_internal`。
@@ -91,7 +92,7 @@ LanDrop 是一个面向 Windows 11 服务机与浏览器客户机的轻量局域
 - 移动 Web UI 支持文件复选、批量下载确认、多文件选择和串行上传队列；单文件下载保持在列表页，仍使用浏览器原生 HTTP、`Content-Disposition` 和 Range，不使用 JS Blob 接管大文件。
 - 桌面版增加独立“保存设置”、详细诊断、打开日志文件夹和复制隐私化诊断信息入口；普通运行与异常日志写入 `%LOCALAPPDATA%\LanDrop\logs\application.log`。
 - Windows 单实例控制已实现：再次启动会唤起已有窗口并退出新进程，不创建第二套托盘、服务控制器或 TCP 8000 监听。
-- 已建立 Python 3.12 x64 + PyInstaller 6.22.3 的 `--onedir` 构建基线、spec、构建脚本和无窗口自检；打包版仍待完整 GUI、托盘、Toast 和传输人工回归。
+- 已建立 Python 3.12 x64 + PyInstaller 6.22.3 的 `--onedir` 开发/排错/便携回归基线、spec、构建脚本和无窗口自检；GUI、托盘、Toast、传输和本机路径回归均已通过。第八阶段继续以该 onedir 结构作为正式主程序 payload，并另行构建单文件 Setup/Uninstall。
 
 ## 产品边界
 
@@ -137,7 +138,7 @@ LanDrop/
 ├─ docs/plans/          # 设计与开发计划
 ├─ requirements.txt
 ├─ requirements-build.txt
-├─ LanDrop.spec         # PyInstaller --onedir 构建定义
+├─ LanDrop.spec         # 第七阶段 PyInstaller --onedir 回归构建定义
 └─ README.md
 ```
 
@@ -149,7 +150,7 @@ LanDrop/
 - 源码开发与正式构建基线为 Python 3.12 x64；
 - Microsoft Edge WebView2 Runtime；
 - 当前网络由用户确认为可信 `Private` 网络；
-- Windows 防火墙保持开启；首次监听如出现系统提示，由用户自行决定仅允许 `Private` 网络通信。LanDrop 便携版不会主动创建规则。
+- Windows 防火墙保持开启；首次监听如出现系统提示，由用户自行决定仅允许 `Private` 网络通信。Setup、LanDrop 与 Uninstall 都不主动创建、修改或删除防火墙规则，只检测、解释并提供 Windows 设置入口。
 
 安装依赖：
 
@@ -192,7 +193,7 @@ python app.py `
 
 两个自定义目录必须已经存在。未传入命令行参数时，CLI 会读取与桌面版相同的 `config.json`；命令行显式参数只覆盖本次运行，不自动改写设置。上传上限允许设置为 1 至 10000 MB；默认 1000 MB。这里的 MB 是十进制单位，`1 MB = 1,000,000 byte`。修改目录或上限需要停止后重新启动。
 
-## 构建便携版
+## 构建第七阶段 `--onedir` 回归基线
 
 安装冻结的构建依赖：
 
@@ -206,7 +207,9 @@ python -m pip install -r requirements-build.txt
 .\scripts\build-portable.ps1 -Python "C:\path\to\python.exe"
 ```
 
-脚本固定检查 PyInstaller 6.22.3，生成 `dist\LanDrop`，运行无窗口依赖/资源自检，并写入 `build-info.json` 与 EXE SHA-256。正式便携程序不依赖终端；启动与异常诊断写入 `%LOCALAPPDATA%\LanDrop\logs\application.log`。
+脚本固定检查 PyInstaller 6.22.3，生成 `dist\LanDrop`，运行无窗口依赖/资源自检，并写入 `build-info.json` 与 EXE SHA-256。该无控制台回归构建不依赖终端；启动与异常诊断写入 `%LOCALAPPDATA%\LanDrop\logs\application.log`。
+
+该目录既是开发、排错、便携路径与兼容性回归基线，也是第八阶段正式安装版主程序 payload 的结构基础。最终用户获得单文件 `LanDrop-Setup.exe`；Setup 将完整 onedir 主程序部署到当前用户固定位置，并建立快捷方式、通知身份、启动项和卸载登记。安装生命周期不主动写入防火墙规则。
 
 自动验证便携目录可移动到含中文和空格的路径，并从非程序工作目录启动：
 
@@ -313,4 +316,4 @@ Windows 已展开的托盘菜单是静态快照：若服务恰在菜单保持展
 - Private 网络与浏览器凭据不能替代 HTTPS；不要在公司、酒店、咖啡店等陌生网络中使用。
 - 程序不会自动更改网络类别、代理、VPN 或防火墙规则。
 
-详细设计见 [`docs/plans/LAN_file_transfer_development_plan_revised_v3.md`](docs/plans/LAN_file_transfer_development_plan_revised_v3.md)。
+当前权威设计见 [`docs/plans/LAN_file_transfer_development_plan_revised_v4.md`](docs/plans/LAN_file_transfer_development_plan_revised_v4.md)。V3 仅保留为历史决策演进记录。

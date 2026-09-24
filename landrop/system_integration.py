@@ -1,0 +1,512 @@
+"""Allowlisted current-user Windows integration for a first LanDrop install."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+import json
+import os
+from pathlib import Path
+import stat
+import subprocess
+import tempfile
+from typing import Any, Mapping, Protocol
+
+from .install_contract import (
+    APP_USER_MODEL_ID,
+    DISPLAY_NAME,
+    PRODUCT_ID,
+    PUBLISHER,
+    RUN_KEY,
+    RUN_VALUE_NAME,
+    UNINSTALL_KEY,
+    InstallPaths,
+    is_reparse_object,
+)
+
+
+_MAX_SHORTCUT_BYTES = 4 * 1024 * 1024
+
+
+class SystemIntegrationError(RuntimeError):
+    """A frozen Windows integration object could not be safely managed."""
+
+
+@dataclass(frozen=True, slots=True)
+class ShortcutSpec:
+    path: Path
+    target: Path
+    arguments: str
+    working_directory: Path
+    description: str
+    icon_location: str
+    app_user_model_id: str = APP_USER_MODEL_ID
+
+    def __post_init__(self) -> None:
+        path = _absolute(self.path, "快捷方式路径")
+        target = _absolute(self.target, "快捷方式目标")
+        working = _absolute(self.working_directory, "快捷方式工作目录")
+        if path.name != "LanDrop.lnk" or path.suffix.casefold() != ".lnk":
+            raise SystemIntegrationError("快捷方式文件名不属于 LanDrop。")
+        if target.name != "LanDrop.exe":
+            raise SystemIntegrationError("快捷方式目标必须是 LanDrop.exe。")
+        if not _same_path(working, target.parent):
+            raise SystemIntegrationError("快捷方式工作目录必须是 app 目录。")
+        if self.arguments:
+            raise SystemIntegrationError("LanDrop 主快捷方式不得携带参数。")
+        if self.app_user_model_id != APP_USER_MODEL_ID:
+            raise SystemIntegrationError("快捷方式 AUMID 不符合冻结身份。")
+        if self.icon_location != f"{target},0":
+            raise SystemIntegrationError("快捷方式图标必须来自正式 LanDrop.exe。")
+        object.__setattr__(self, "path", path)
+        object.__setattr__(self, "target", target)
+        object.__setattr__(self, "working_directory", working)
+
+    def to_bridge_json(self) -> dict[str, str]:
+        return {
+            "path": str(self.path),
+            "target": str(self.target),
+            "arguments": self.arguments,
+            "workingDirectory": str(self.working_directory),
+            "description": self.description,
+            "iconLocation": self.icon_location,
+            "appUserModelId": self.app_user_model_id,
+        }
+
+    @classmethod
+    def from_bridge_json(cls, raw: Mapping[str, object]) -> ShortcutSpec:
+        expected = {
+            "path",
+            "target",
+            "arguments",
+            "workingDirectory",
+            "description",
+            "iconLocation",
+            "appUserModelId",
+        }
+        if set(raw) != expected or any(not isinstance(raw[key], str) for key in expected):
+            raise SystemIntegrationError("快捷方式读回数据字段不匹配。")
+        return cls(
+            path=Path(str(raw["path"])),
+            target=Path(str(raw["target"])),
+            arguments=str(raw["arguments"]),
+            working_directory=Path(str(raw["workingDirectory"])),
+            description=str(raw["description"]),
+            icon_location=str(raw["iconLocation"]),
+            app_user_model_id=str(raw["appUserModelId"]),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class InstalledAppRegistration:
+    display_name: str
+    display_version: str
+    publisher: str
+    display_icon: str
+    install_location: str
+    uninstall_string: str
+    estimated_size_kib: int
+    no_modify: int = 1
+    no_repair: int = 1
+
+    def __post_init__(self) -> None:
+        if self.display_name != DISPLAY_NAME or self.publisher != PUBLISHER:
+            raise SystemIntegrationError("卸载登记产品身份不匹配。")
+        if not self.display_version or len(self.display_version) > 256:
+            raise SystemIntegrationError("卸载登记版本无效。")
+        if self.no_modify != 1 or self.no_repair != 1:
+            raise SystemIntegrationError("卸载登记维护标记无效。")
+        if isinstance(self.estimated_size_kib, bool) or self.estimated_size_kib < 1:
+            raise SystemIntegrationError("EstimatedSize 必须是正整数 KiB。")
+
+    def registry_values(self) -> dict[str, str | int]:
+        return {
+            "DisplayName": self.display_name,
+            "DisplayVersion": self.display_version,
+            "Publisher": self.publisher,
+            "DisplayIcon": self.display_icon,
+            "InstallLocation": self.install_location,
+            "UninstallString": self.uninstall_string,
+            "EstimatedSize": self.estimated_size_kib,
+            "NoModify": self.no_modify,
+            "NoRepair": self.no_repair,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class IntegrationPlan:
+    start_menu_shortcut: ShortcutSpec
+    desktop_shortcut: ShortcutSpec
+    desktop_enabled: bool
+    run_command: str
+    registration: InstalledAppRegistration
+
+    @classmethod
+    def create(
+        cls,
+        paths: InstallPaths,
+        *,
+        version: str,
+        estimated_size_kib: int,
+        desktop_enabled: bool,
+    ) -> IntegrationPlan:
+        if not isinstance(desktop_enabled, bool):
+            raise SystemIntegrationError("桌面快捷方式选项必须是布尔值。")
+        target = paths.main_executable
+        shortcut_values = {
+            "target": target,
+            "arguments": "",
+            "working_directory": paths.app_directory,
+            "description": "LanDrop 局域网文件收发",
+            "icon_location": f"{target},0",
+        }
+        run_command = subprocess.list2cmdline([str(target), "--startup"])
+        uninstall_string = subprocess.list2cmdline([str(paths.uninstall_executable)])
+        return cls(
+            start_menu_shortcut=ShortcutSpec(
+                path=paths.start_menu_shortcut,
+                **shortcut_values,
+            ),
+            desktop_shortcut=ShortcutSpec(
+                path=paths.desktop_shortcut,
+                **shortcut_values,
+            ),
+            desktop_enabled=desktop_enabled,
+            run_command=run_command,
+            registration=InstalledAppRegistration(
+                display_name=DISPLAY_NAME,
+                display_version=version,
+                publisher=PUBLISHER,
+                display_icon=f"{target},0",
+                install_location=str(paths.install_root),
+                uninstall_string=uninstall_string,
+                estimated_size_kib=max(1, estimated_size_kib),
+            ),
+        )
+
+    def snapshot_json(self) -> dict[str, object]:
+        return {
+            "schema_version": 1,
+            "objects": {
+                "start_menu_shortcut": {"exists": False},
+                "desktop_shortcut": {"exists": False},
+                "run_value": {"exists": False},
+                "uninstall_key": {"exists": False},
+            },
+        }
+
+
+class FirstInstallIntegration(Protocol):
+    def assert_absent(self, plan: IntegrationPlan) -> None: ...
+
+    def write(self, plan: IntegrationPlan) -> None: ...
+
+    def verify(self, plan: IntegrationPlan) -> None: ...
+
+    def rollback(self, plan: IntegrationPlan) -> None: ...
+
+
+class ShortcutBackend(Protocol):
+    def read(self, path: Path) -> ShortcutSpec | None: ...
+
+    def write(self, shortcut: ShortcutSpec) -> None: ...
+
+    def remove_created(self, path: Path) -> None: ...
+
+
+class PowerShellShortcutBackend:
+    """Use the frozen local PowerShell bridge for WSH .lnk + AUMID metadata."""
+
+    TIMEOUT_SECONDS = 30
+
+    def __init__(self, allowed_paths: tuple[Path, ...], bridge_path: Path) -> None:
+        if len(allowed_paths) != 2:
+            raise SystemIntegrationError("快捷方式白名单必须精确包含两个路径。")
+        self._allowed_paths = tuple(_absolute(path, "快捷方式白名单") for path in allowed_paths)
+        self._bridge_path = _absolute(bridge_path, "快捷方式桥接脚本")
+
+    def _allowed(self, path: Path) -> Path:
+        candidate = _absolute(path, "快捷方式路径")
+        if not any(_same_path(candidate, allowed) for allowed in self._allowed_paths):
+            raise SystemIntegrationError(f"快捷方式路径不在白名单：{candidate}")
+        return candidate
+
+    def _run(self, action: str, request: Mapping[str, object]) -> dict[str, object]:
+        if os.name != "nt":
+            raise SystemIntegrationError("Windows 快捷方式只支持 Windows。")
+        if not self._bridge_path.is_file() or is_reparse_object(self._bridge_path):
+            raise SystemIntegrationError("快捷方式桥接脚本缺失或不安全。")
+        powershell = Path(os.environ.get("SYSTEMROOT", r"C:\Windows")) / (
+            r"System32\WindowsPowerShell\v1.0\powershell.exe"
+        )
+        if not powershell.is_file():
+            raise SystemIntegrationError("未找到 Windows PowerShell。")
+        command = [
+            str(powershell),
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            str(self._bridge_path),
+            "-Action",
+            action,
+        ]
+        try:
+            with tempfile.TemporaryDirectory(prefix="landrop-shortcut-") as temporary:
+                request_path = Path(temporary) / "request.json"
+                request_path.write_text(
+                    json.dumps(request, ensure_ascii=False, separators=(",", ":")),
+                    encoding="utf-8-sig",
+                )
+                completed = subprocess.run(
+                    [*command, "-RequestPath", str(request_path)],
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8-sig",
+                    errors="replace",
+                    timeout=self.TIMEOUT_SECONDS,
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise SystemIntegrationError(f"快捷方式桥接执行失败：{exc}") from exc
+        if completed.returncode != 0:
+            detail = (completed.stderr or completed.stdout).strip()
+            raise SystemIntegrationError(
+                f"快捷方式桥接返回 {completed.returncode}：{detail or '无输出'}"
+            )
+        try:
+            payload = json.loads(completed.stdout)
+        except json.JSONDecodeError as exc:
+            raise SystemIntegrationError("快捷方式桥接返回了无效 JSON。") from exc
+        if not isinstance(payload, dict) or payload.get("ok") is not True:
+            raise SystemIntegrationError(f"快捷方式桥接结果无效：{payload!r}")
+        return payload
+
+    def read(self, path: Path) -> ShortcutSpec | None:
+        target = self._allowed(path)
+        if os.path.lexists(target) and is_reparse_object(target):
+            raise SystemIntegrationError("拒绝读取 reparse 快捷方式。")
+        payload = self._run("Read", {"path": str(target)})
+        if payload.get("exists") is False:
+            return None
+        if payload.get("readable") is not True or not isinstance(payload.get("shortcut"), dict):
+            raise SystemIntegrationError("现有快捷方式无法安全解释。")
+        return ShortcutSpec.from_bridge_json(payload["shortcut"])
+
+    def write(self, shortcut: ShortcutSpec) -> None:
+        target = self._allowed(shortcut.path)
+        if os.path.lexists(target):
+            raise SystemIntegrationError(f"首次安装不得覆盖现有快捷方式：{target}")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        payload = self._run("Write", shortcut.to_bridge_json())
+        if payload.get("exists") is not True or self.read(target) != shortcut:
+            raise SystemIntegrationError("快捷方式写入后读回不一致。")
+
+    def remove_created(self, path: Path) -> None:
+        target = self._allowed(path)
+        if not os.path.lexists(target):
+            return
+        if is_reparse_object(target):
+            raise SystemIntegrationError(f"拒绝删除 reparse 快捷方式：{target}")
+        details = target.stat()
+        if not stat.S_ISREG(details.st_mode) or details.st_size > _MAX_SHORTCUT_BYTES:
+            raise SystemIntegrationError(f"拒绝删除类型或大小异常的快捷方式：{target}")
+        try:
+            target.unlink()
+            if target.parent.name == PRODUCT_ID:
+                try:
+                    target.parent.rmdir()
+                except OSError:
+                    pass
+        except OSError as exc:
+            raise SystemIntegrationError(f"无法删除快捷方式：{target}：{exc}") from exc
+
+
+class WindowsFirstInstallIntegration:
+    """Write and read back exactly the four frozen current-user objects."""
+
+    def __init__(
+        self,
+        shortcuts: ShortcutBackend,
+        *,
+        registry_module: Any | None = None,
+    ) -> None:
+        if registry_module is None:
+            try:
+                import winreg as registry_module
+            except ImportError as exc:
+                raise SystemIntegrationError("当前平台不支持 Windows 注册表。") from exc
+        self._registry = registry_module
+        self._shortcuts = shortcuts
+
+    def assert_absent(self, plan: IntegrationPlan) -> None:
+        if self._shortcuts.read(plan.start_menu_shortcut.path) is not None:
+            raise SystemIntegrationError("开始菜单快捷方式已存在，拒绝首次安装覆盖。")
+        if self._shortcuts.read(plan.desktop_shortcut.path) is not None:
+            raise SystemIntegrationError("桌面快捷方式已存在，拒绝首次安装覆盖。")
+        if self._read_run() is not None:
+            raise SystemIntegrationError("HKCU Run 中已存在 LanDrop，拒绝覆盖。")
+        if self._read_uninstall_raw() is not None:
+            raise SystemIntegrationError("HKCU Uninstall 中已存在 LanDrop，拒绝覆盖。")
+
+    def write(self, plan: IntegrationPlan) -> None:
+        self._shortcuts.write(plan.start_menu_shortcut)
+        if plan.desktop_enabled:
+            self._shortcuts.write(plan.desktop_shortcut)
+        self._write_run(plan.run_command)
+        self._write_uninstall(plan.registration)
+
+    def verify(self, plan: IntegrationPlan) -> None:
+        if self._shortcuts.read(plan.start_menu_shortcut.path) != plan.start_menu_shortcut:
+            raise SystemIntegrationError("开始菜单快捷方式读回不一致。")
+        expected_desktop = plan.desktop_shortcut if plan.desktop_enabled else None
+        if self._shortcuts.read(plan.desktop_shortcut.path) != expected_desktop:
+            raise SystemIntegrationError("桌面快捷方式读回不一致。")
+        if self._read_run() != plan.run_command:
+            raise SystemIntegrationError("HKCU Run 读回不一致。")
+        if self._read_uninstall_raw() != plan.registration.registry_values():
+            raise SystemIntegrationError("HKCU Uninstall 读回不一致。")
+
+    def rollback(self, plan: IntegrationPlan) -> None:
+        errors: list[str] = []
+        for shortcut in (plan.desktop_shortcut, plan.start_menu_shortcut):
+            try:
+                self._shortcuts.remove_created(shortcut.path)
+            except Exception as exc:
+                errors.append(str(exc))
+        try:
+            self._remove_created_run()
+        except Exception as exc:
+            errors.append(str(exc))
+        try:
+            self._remove_created_uninstall()
+        except Exception as exc:
+            errors.append(str(exc))
+        if errors:
+            raise SystemIntegrationError("系统集成回滚不完整：" + "；".join(errors))
+
+    def _read_run(self) -> str | None:
+        registry = self._registry
+        try:
+            with registry.OpenKey(
+                registry.HKEY_CURRENT_USER,
+                RUN_KEY,
+                0,
+                registry.KEY_READ,
+            ) as key:
+                value, value_type = registry.QueryValueEx(key, RUN_VALUE_NAME)
+        except FileNotFoundError:
+            return None
+        if value_type != registry.REG_SZ or not isinstance(value, str):
+            raise SystemIntegrationError("HKCU Run LanDrop 值类型不可解释。")
+        return value
+
+    def _write_run(self, value: str) -> None:
+        registry = self._registry
+        with registry.CreateKeyEx(
+            registry.HKEY_CURRENT_USER,
+            RUN_KEY,
+            0,
+            registry.KEY_READ | registry.KEY_WRITE,
+        ) as key:
+            registry.SetValueEx(key, RUN_VALUE_NAME, 0, registry.REG_SZ, value)
+
+    def _remove_created_run(self) -> None:
+        registry = self._registry
+        try:
+            with registry.OpenKey(
+                registry.HKEY_CURRENT_USER,
+                RUN_KEY,
+                0,
+                registry.KEY_SET_VALUE,
+            ) as key:
+                registry.DeleteValue(key, RUN_VALUE_NAME)
+        except FileNotFoundError:
+            return
+
+    def _read_uninstall_raw(self) -> dict[str, str | int] | None:
+        registry = self._registry
+        try:
+            with registry.OpenKey(
+                registry.HKEY_CURRENT_USER,
+                UNINSTALL_KEY,
+                0,
+                registry.KEY_READ,
+            ) as key:
+                subkeys, value_count, _modified = registry.QueryInfoKey(key)
+                if subkeys:
+                    raise SystemIntegrationError("HKCU Uninstall 含未知子键。")
+                values: dict[str, str | int] = {}
+                for index in range(value_count):
+                    name, value, value_type = registry.EnumValue(key, index)
+                    expected_type = registry.REG_DWORD if isinstance(value, int) else registry.REG_SZ
+                    if value_type != expected_type or not isinstance(value, (str, int)):
+                        raise SystemIntegrationError("HKCU Uninstall 值类型不可解释。")
+                    values[name] = value
+        except FileNotFoundError:
+            return None
+        return values
+
+    def _write_uninstall(self, registration: InstalledAppRegistration) -> None:
+        registry = self._registry
+        with registry.CreateKeyEx(
+            registry.HKEY_CURRENT_USER,
+            UNINSTALL_KEY,
+            0,
+            registry.KEY_READ | registry.KEY_WRITE,
+        ) as key:
+            for name, value in registration.registry_values().items():
+                value_type = registry.REG_DWORD if isinstance(value, int) else registry.REG_SZ
+                registry.SetValueEx(key, name, 0, value_type, value)
+
+    def _remove_created_uninstall(self) -> None:
+        registry = self._registry
+        try:
+            with registry.OpenKey(
+                registry.HKEY_CURRENT_USER,
+                UNINSTALL_KEY,
+                0,
+                registry.KEY_READ | registry.KEY_WRITE,
+            ) as key:
+                subkeys, value_count, _modified = registry.QueryInfoKey(key)
+                if subkeys:
+                    raise SystemIntegrationError("HKCU Uninstall 键含未知子键。")
+                names = [registry.EnumValue(key, index)[0] for index in range(value_count)]
+                for name in names:
+                    registry.DeleteValue(key, name)
+        except FileNotFoundError:
+            return
+        registry.DeleteKey(registry.HKEY_CURRENT_USER, UNINSTALL_KEY)
+
+
+def installed_size_kib(root: Path) -> int:
+    total = 0
+    for directory, directory_names, file_names in os.walk(root, topdown=True, followlinks=False):
+        current = Path(directory)
+        if is_reparse_object(current):
+            raise SystemIntegrationError(f"程序目录包含 reparse object：{current}")
+        for name in directory_names:
+            if is_reparse_object(current / name):
+                raise SystemIntegrationError(f"程序目录包含 reparse object：{current / name}")
+        for name in file_names:
+            path = current / name
+            if is_reparse_object(path):
+                raise SystemIntegrationError(f"程序文件是 reparse object：{path}")
+            details = path.stat()
+            if not stat.S_ISREG(details.st_mode):
+                raise SystemIntegrationError(f"程序路径不是普通文件：{path}")
+            total += details.st_size
+    return max(1, (total + 1023) // 1024)
+
+
+def _absolute(path: Path, label: str) -> Path:
+    candidate = Path(os.path.abspath(path))
+    if not candidate.is_absolute():
+        raise SystemIntegrationError(f"{label}必须是绝对路径。")
+    return candidate
+
+
+def _same_path(left: Path, right: Path) -> bool:
+    return os.path.normcase(os.path.abspath(left)) == os.path.normcase(os.path.abspath(right))

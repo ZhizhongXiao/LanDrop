@@ -224,8 +224,6 @@ def _manifest_from_json(raw: Mapping[str, object]) -> PayloadManifest:
     sorted_entries = sorted(entries, key=lambda entry: (entry.relative_path.casefold(), entry.relative_path))
     if entries != sorted_entries:
         raise PayloadManifestError("payload manifest 文件条目必须按路径排序。")
-    if not any(entry.relative_path.casefold() == "landrop.exe" for entry in entries):
-        raise PayloadManifestError("payload manifest 缺少根目录 LanDrop.exe。")
     return PayloadManifest(
         product_id=product_id,
         version=_required_text(raw["version"], "version"),

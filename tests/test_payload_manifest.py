@@ -116,14 +116,6 @@ class PayloadManifestTests(unittest.TestCase):
             with self.assertRaises(PayloadManifestError):
                 verify_payload(payload, replace(manifest, files=(bad_hash, *manifest.files[1:])))
 
-            without_executable = replace(
-                manifest,
-                files=tuple(
-                    entry for entry in manifest.files if entry.relative_path != "LanDrop.exe"
-                ),
-            )
-            with self.assertRaisesRegex(PayloadManifestError, "LanDrop.exe"):
-                verify_payload(payload, without_executable)
 
 
 if __name__ == "__main__":

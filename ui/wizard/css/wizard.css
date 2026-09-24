@@ -272,6 +272,11 @@ input {
   line-height: 1.55;
 }
 
+.preview-note.error {
+  border-left-color: var(--danger);
+  color: var(--danger);
+}
+
 .wizard-footer {
   display: flex;
   align-items: center;

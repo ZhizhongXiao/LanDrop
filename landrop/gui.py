@@ -266,6 +266,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--grace-seconds", type=int, default=60)
     parser.add_argument("--debug", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--self-check", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--startup", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
     if not 5 <= args.session_seconds <= 86_400 or not 0 <= args.grace_seconds <= 600:
         parser.error("session-seconds 需为 5–86400，grace-seconds 需为 0–600")
@@ -374,6 +375,7 @@ def main(argv: list[str] | None = None) -> int:
         width=1060,
         height=760,
         min_size=(820, 640),
+        **_desktop_window_visibility(args.startup),
         background_color="#eaf2fb",
         text_select=True,
     )
@@ -523,6 +525,11 @@ def _desktop_entry_path() -> Path:
     if not entry.is_file():
         raise RuntimeError(f"LanDrop 桌面界面资源不存在：{entry}")
     return entry
+
+
+def _desktop_window_visibility(startup: bool) -> dict[str, bool]:
+    """Keep the only pywebview Window alive but hidden for HKCU Run startup."""
+    return {"hidden": startup, "focus": not startup}
 
 
 def _acquire_desktop_startup_ownership(

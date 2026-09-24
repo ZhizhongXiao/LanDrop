@@ -22,6 +22,8 @@ build/
 dist/
 *.spec
 !LanDrop.spec
+!Setup.spec
+!Uninstall.spec
 
 # Runtime and incomplete transfers
 *.part

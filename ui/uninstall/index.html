@@ -23,8 +23,8 @@
       <div class="wizard-content">
         <section class="wizard-page active">
           <p class="wizard-kicker">UNINSTALL</p><h1>卸载 LanDrop</h1>
-          <p class="wizard-lead">正式卸载器将先停止传输服务、关闭 TCP 8000，再删除程序文件和由安装器创建的系统入口。</p>
-          <div class="preview-note">这是界面草图，不会停止当前 LanDrop 或删除任何文件。</div>
+          <p class="wizard-lead">此可执行文件是首次安装闭环所需的独立卸载器构建产物。</p>
+          <div class="preview-note">Phase 8B 尚未启用卸载执行；当前界面不会停止 LanDrop、删除文件或修改系统。</div>
         </section>
         <section class="wizard-page">
           <p class="wizard-kicker">USER DATA</p><h1>选择要保留的数据</h1>
@@ -37,7 +37,7 @@
         </section>
         <section class="wizard-page">
           <p class="wizard-kicker">CONFIRM</p><h1>确认卸载</h1>
-          <p class="wizard-lead">正式流程会清理由安装器创建的快捷方式、通知身份、开机启动项和防火墙规则；不会碰触用户收发的文件。</p>
+          <p class="wizard-lead">后续正式流程只会清理对象清单内的快捷方式、开机启动项和卸载登记；不会修改防火墙，也不会碰触用户收发文件。</p>
           <div class="summary-list">
             <div class="summary-row"><strong>传输服务</strong><span>停止并关闭 TCP 8000</span></div>
             <div class="summary-row"><strong>系统入口</strong><span>清理由安装器创建的项目</span></div>
@@ -46,7 +46,7 @@
           <div id="previewResult" class="preview-note">尚未执行卸载。</div>
         </section>
       </div>
-      <footer class="wizard-footer"><span class="wizard-version">LanDrop · 卸载器视觉草图</span><div class="footer-actions"><button id="back" class="wizard-button" type="button">返回</button><button id="next" class="wizard-button primary" type="button">继续</button></div></footer>
+      <footer class="wizard-footer"><span class="wizard-version">LanDrop · Phase 8B 卸载器占位构建</span><div class="footer-actions"><button id="back" class="wizard-button" type="button">返回</button><button id="next" class="wizard-button primary" type="button">继续</button></div></footer>
     </section>
   </main>
   <script src="../shared/js/theme.js"></script>
