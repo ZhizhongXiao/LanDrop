@@ -5,8 +5,8 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from typing import Callable, Protocol
 
+from .install_contract import APP_USER_MODEL_ID
 
-APP_USER_MODEL_ID = "LanDrop.Desktop"
 TOAST_GROUP = "LanDrop.Actionable"
 STATUS_TOAST_GROUP = "LanDrop.Status"
 

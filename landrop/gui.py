@@ -13,6 +13,9 @@ from typing import Any
 
 from . import __version__
 from .app_logging import configure_application_logging, install_exception_hooks
+from .install_contract import InstallContractError, InstallPaths
+from .install_lock import InstallLifecycleLock, InstallLifecycleLockError
+from .install_state import InstallationStateStore, InstallStateError
 from .settings import (
     AppSettings,
     DEFAULT_MAX_UPLOAD_MB,
@@ -269,42 +272,46 @@ def main(argv: list[str] | None = None) -> int:
     if os.name != "nt":
         print("LanDrop 桌面版目前只支持 Windows。", file=sys.stderr)
         return 1
-    try:
-        import webview
-    except ImportError:
-        print(
-            "缺少 pywebview。请先运行：python -m pip install -r requirements.txt",
-            file=sys.stderr,
-        )
-        return 1
-
     data_directory = default_data_directory()
-    try:
-        logger = configure_application_logging(data_directory, debug=args.debug)
-    except OSError as exc:
-        print(f"无法创建 LanDrop 日志：{exc}", file=sys.stderr)
-        return 1
-    restore_exception_hooks = install_exception_hooks(logger)
     if args.self_check:
+        try:
+            logger = configure_application_logging(data_directory, debug=args.debug)
+        except OSError as exc:
+            print(f"无法创建 LanDrop 日志：{exc}", file=sys.stderr)
+            return 1
+        restore_exception_hooks = install_exception_hooks(logger)
         result = _portable_self_check(logger)
         restore_exception_hooks()
         return result
-    single_instance = DesktopSingleInstance(data_directory)
+
+    # Ordinary startup enters the maintenance gate before importing the GUI
+    # runtime or creating any normal application state.
     try:
-        is_primary = single_instance.acquire()
-    except (OSError, SingleInstanceError) as exc:
-        logger.error("无法初始化单实例控制：%s", exc)
-        restore_exception_hooks()
+        single_instance, is_primary = _acquire_desktop_startup_ownership(data_directory)
+    except (
+        InstallContractError,
+        InstallLifecycleLockError,
+        InstallStateError,
+        OSError,
+        SingleInstanceError,
+    ) as exc:
         _show_native_error(f"LanDrop 无法启动：{exc}")
         return 1
     if not is_primary:
         activated = single_instance.notify_existing()
         single_instance.close()
-        restore_exception_hooks()
         if not activated:
             _show_native_error("LanDrop 已在运行，但暂时无法唤起现有窗口。")
             return 1
         return 0
+
+    try:
+        logger = configure_application_logging(data_directory, debug=args.debug)
+    except OSError as exc:
+        single_instance.close()
+        _show_native_error(f"无法创建 LanDrop 日志：{exc}")
+        return 1
+    restore_exception_hooks = install_exception_hooks(logger)
     webview2_version = webview2_runtime_version()
     if not webview2_version:
         message = (
@@ -317,6 +324,15 @@ def main(argv: list[str] | None = None) -> int:
         _show_native_error(message)
         return 1
     logger.info("Microsoft Edge WebView2 Runtime %s", webview2_version)
+    try:
+        import webview
+    except ImportError:
+        message = "缺少 pywebview。请重新安装 LanDrop 或检查 requirements.txt。"
+        logger.error(message)
+        single_instance.close()
+        restore_exception_hooks()
+        _show_native_error(message)
+        return 1
     settings_store = SettingsStore(data_directory)
     settings = settings_store.load()
     try:
@@ -509,19 +525,51 @@ def _desktop_entry_path() -> Path:
     return entry
 
 
+def _acquire_desktop_startup_ownership(
+    data_directory: Path,
+    *,
+    install_paths: InstallPaths | None = None,
+    lifecycle_lock: InstallLifecycleLock | None = None,
+    state_store: InstallationStateStore | None = None,
+    single_instance: DesktopSingleInstance | None = None,
+) -> tuple[DesktopSingleInstance, bool]:
+    """Pass the maintenance gate, then establish ordinary desktop ownership.
+
+    ``--self-check`` never calls this function.  The lifecycle lock remains held
+    until the desktop single-instance identity has been established, closing the
+    startup-versus-maintenance TOCTOU window.
+    """
+    paths = install_paths or InstallPaths.from_environment()
+    maintenance_lock = lifecycle_lock or InstallLifecycleLock(paths)
+    state = state_store or InstallationStateStore(paths)
+    desktop_instance = single_instance or DesktopSingleInstance(data_directory)
+    try:
+        acquired = maintenance_lock.acquire(0.0)
+        if not acquired:
+            raise InstallLifecycleLockError("LanDrop 正在安装、升级或卸载，请稍后重试。")
+        state.ensure_normal_start_allowed()
+        is_primary = desktop_instance.acquire()
+        return desktop_instance, is_primary
+    except Exception:
+        desktop_instance.close()
+        raise
+    finally:
+        maintenance_lock.close()
+
+
 def _portable_self_check(logger: Any) -> int:
     try:
         from importlib.metadata import version
 
+        runtime_version = webview2_runtime_version()
+        if not runtime_version:
+            raise RuntimeError("未检测到 Microsoft Edge WebView2 Runtime")
         import pystray  # noqa: F401
         import qrcode  # noqa: F401
         import webview  # noqa: F401
         import windows_toasts  # noqa: F401
         from PIL import Image
 
-        runtime_version = webview2_runtime_version()
-        if not runtime_version:
-            raise RuntimeError("未检测到 Microsoft Edge WebView2 Runtime")
         icon_path = resource_path("assets/LanDrop.ico")
         with Image.open(icon_path) as icon:
             if icon.convert("RGBA").getextrema()[3][0] != 0:
