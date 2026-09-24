@@ -56,7 +56,7 @@ const wizardOptions = {
   finishLabel: "安装",
   onFinish: async ({ next, back }) => {
     if (next.dataset.started === "true") return;
-    if (["downgrade_blocked", "untrusted"].includes(setupDisposition)) {
+    if (["downgrade_blocked", "build_mismatch", "untrusted"].includes(setupDisposition)) {
       setResult(setupBlockedMessage || "当前安装状态不允许继续。", true);
       return;
     }
@@ -105,6 +105,7 @@ window.addEventListener("pywebviewready", async () => {
     upgrade: "升级",
     already_installed: status.pending_cleanup?.length ? "重试清理" : "检查完成",
     downgrade_blocked: "不可降级",
+    build_mismatch: "构建不匹配",
     incomplete: "恢复并继续",
     untrusted: "无法继续"
   };

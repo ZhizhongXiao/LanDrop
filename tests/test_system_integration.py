@@ -231,6 +231,43 @@ class SystemIntegrationTests(unittest.TestCase):
                 "1.0.0",
             )
             self.assertEqual(registry.keys[UNINSTALL_KEY]["EstimatedSize"][0], 100)
+            self.assertEqual(
+                registry.keys[UNINSTALL_KEY]["EstimatedSize"][1],
+                registry.REG_DWORD,
+            )
+
+    def test_upgrade_rollback_restores_missing_estimated_size_as_missing(self) -> None:
+        with temporary_directory() as temporary:
+            paths = self._paths(Path(temporary))
+            shortcuts = _Shortcuts()
+            registry = _Registry()
+            backend = WindowsFirstInstallIntegration(shortcuts, registry_module=registry)
+            plan_a = IntegrationPlan.create(
+                paths,
+                version="1.0.0",
+                estimated_size_kib=100,
+                desktop_enabled=False,
+            )
+            backend.write(plan_a)
+            registry.DeleteValue(_Key(registry, UNINSTALL_KEY), "EstimatedSize")
+
+            snapshot = backend.snapshot(plan_a)
+            self.assertFalse(snapshot.estimated_size_exists)
+
+            backend.update_registration(
+                snapshot,
+                version="2.0.0",
+                estimated_size_kib=250,
+            )
+            self.assertEqual(registry.keys[UNINSTALL_KEY]["EstimatedSize"][0], 250)
+
+            backend.restore_upgrade(snapshot)
+
+            self.assertEqual(
+                registry.keys[UNINSTALL_KEY]["DisplayVersion"][0],
+                "1.0.0",
+            )
+            self.assertNotIn("EstimatedSize", registry.keys[UNINSTALL_KEY])
 
     def test_upgrade_preserves_deleted_run_and_absent_desktop(self) -> None:
         with temporary_directory() as temporary:

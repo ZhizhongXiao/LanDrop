@@ -214,6 +214,28 @@ class UpgradeIntegrationSnapshot:
     desktop_shortcut: ShortcutSpec | None
     run_command: str | None
     registration: InstalledAppRegistration
+    estimated_size_exists: bool = True
+    estimated_size_value: int | None = None
+    estimated_size_type: int | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.estimated_size_exists, bool):
+            raise SystemIntegrationError("升级快照 EstimatedSize 存在状态无效。")
+        if self.estimated_size_exists:
+            value = (
+                self.registration.estimated_size_kib
+                if self.estimated_size_value is None
+                else self.estimated_size_value
+            )
+            value_type = 4 if self.estimated_size_type is None else self.estimated_size_type
+            if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+                raise SystemIntegrationError("升级快照 EstimatedSize 值无效。")
+            if not isinstance(value_type, int):
+                raise SystemIntegrationError("升级快照 EstimatedSize 类型无效。")
+            object.__setattr__(self, "estimated_size_value", value)
+            object.__setattr__(self, "estimated_size_type", value_type)
+        elif self.estimated_size_value is not None or self.estimated_size_type is not None:
+            raise SystemIntegrationError("缺失的 EstimatedSize 不得携带值或类型。")
 
     def to_json(self) -> dict[str, object]:
         return {
@@ -227,7 +249,20 @@ class UpgradeIntegrationSnapshot:
             ),
             "run_command": self.run_command,
             "registration": self.registration.registry_values(),
+            "estimated_size_state": {
+                "exists": self.estimated_size_exists,
+                "value": self.estimated_size_value,
+                "type": self.estimated_size_type,
+            },
         }
+
+    def original_registration_values(self) -> dict[str, str | int]:
+        values = self.registration.registry_values()
+        if not self.estimated_size_exists:
+            values.pop("EstimatedSize")
+        elif self.estimated_size_value is not None:
+            values["EstimatedSize"] = self.estimated_size_value
+        return values
 
     @classmethod
     def from_json(cls, raw: Mapping[str, object]) -> UpgradeIntegrationSnapshot:
@@ -238,12 +273,14 @@ class UpgradeIntegrationSnapshot:
             "desktop_shortcut",
             "run_command",
             "registration",
+            "estimated_size_state",
         }
         if set(raw) != expected or raw.get("schema_version") != 1:
             raise SystemIntegrationError("升级系统集成快照 schema 不受支持。")
         start_menu_raw = raw["start_menu_shortcut"]
         desktop_raw = raw["desktop_shortcut"]
         registration_raw = raw["registration"]
+        estimated_size_raw = raw["estimated_size_state"]
         desktop_path = raw["desktop_shortcut_path"]
         run_command = raw["run_command"]
         if not isinstance(start_menu_raw, Mapping):
@@ -252,6 +289,12 @@ class UpgradeIntegrationSnapshot:
             raise SystemIntegrationError("升级快照桌面快捷方式无效。")
         if not isinstance(registration_raw, Mapping):
             raise SystemIntegrationError("升级快照卸载登记无效。")
+        if (
+            not isinstance(estimated_size_raw, Mapping)
+            or set(estimated_size_raw) != {"exists", "value", "type"}
+            or not isinstance(estimated_size_raw["exists"], bool)
+        ):
+            raise SystemIntegrationError("升级快照 EstimatedSize 状态无效。")
         if not isinstance(desktop_path, str) or not desktop_path:
             raise SystemIntegrationError("升级快照桌面快捷方式路径无效。")
         if run_command is not None and not isinstance(run_command, str):
@@ -266,6 +309,9 @@ class UpgradeIntegrationSnapshot:
             ),
             run_command=run_command,
             registration=_registration_from_values(registration_raw),
+            estimated_size_exists=bool(estimated_size_raw["exists"]),
+            estimated_size_value=estimated_size_raw["value"],  # type: ignore[arg-type]
+            estimated_size_type=estimated_size_raw["type"],  # type: ignore[arg-type]
         )
 
 
@@ -484,9 +530,28 @@ class WindowsFirstInstallIntegration:
         run_command = self._read_run()
         if run_command is not None and run_command != plan.run_command:
             raise SystemIntegrationError("HKCU Run 值不属于当前 LanDrop 安装。")
-        registration_raw = self._read_uninstall_raw()
-        if registration_raw is None:
+        registration_typed = self._read_uninstall_typed()
+        if registration_typed is None:
             raise SystemIntegrationError("缺少当前 LanDrop 卸载登记。")
+        registration_raw = {
+            name: value for name, (value, _value_type) in registration_typed.items()
+        }
+        expected_names = set(plan.registration.registry_values())
+        actual_names = frozenset(registration_raw)
+        if actual_names not in {frozenset(expected_names), frozenset(expected_names - {"EstimatedSize"})}:
+            raise SystemIntegrationError("卸载登记字段集合不符合冻结清单。")
+        estimated_size_exists = "EstimatedSize" in registration_raw
+        estimated_size_value = (
+            int(registration_raw["EstimatedSize"])
+            if estimated_size_exists
+            else None
+        )
+        estimated_size_type = (
+            registration_typed["EstimatedSize"][1]
+            if estimated_size_exists
+            else None
+        )
+        registration_raw.setdefault("EstimatedSize", plan.registration.estimated_size_kib)
         registration = _registration_from_values(registration_raw)
         if registration.display_version != plan.registration.display_version:
             raise SystemIntegrationError("卸载登记版本与 install.json 不一致。")
@@ -503,6 +568,9 @@ class WindowsFirstInstallIntegration:
             desktop_shortcut=desktop,
             run_command=run_command,
             registration=registration,
+            estimated_size_exists=estimated_size_exists,
+            estimated_size_value=estimated_size_value,
+            estimated_size_type=estimated_size_type,
         )
 
     def update_registration(
@@ -541,14 +609,14 @@ class WindowsFirstInstallIntegration:
             raise SystemIntegrationError("升级后卸载登记读回不一致。")
 
     def restore_upgrade(self, snapshot: UpgradeIntegrationSnapshot) -> None:
-        self._write_upgrade_registration(snapshot.registration)
+        self._restore_upgrade_registration(snapshot)
         if self._shortcuts.read(snapshot.start_menu_shortcut.path) != snapshot.start_menu_shortcut:
             raise SystemIntegrationError("恢复后开始菜单快捷方式不一致。")
         if self._shortcuts.read(snapshot.desktop_shortcut_path) != snapshot.desktop_shortcut:
             raise SystemIntegrationError("恢复后桌面快捷方式不一致。")
         if self._read_run() != snapshot.run_command:
             raise SystemIntegrationError("恢复后 HKCU Run 状态不一致。")
-        if self._read_uninstall_raw() != snapshot.registration.registry_values():
+        if self._read_uninstall_raw() != snapshot.original_registration_values():
             raise SystemIntegrationError("恢复后卸载登记不一致。")
 
     def _read_run(self) -> str | None:
@@ -591,6 +659,12 @@ class WindowsFirstInstallIntegration:
             return
 
     def _read_uninstall_raw(self) -> dict[str, str | int] | None:
+        typed = self._read_uninstall_typed()
+        if typed is None:
+            return None
+        return {name: value for name, (value, _value_type) in typed.items()}
+
+    def _read_uninstall_typed(self) -> dict[str, tuple[str | int, int]] | None:
         registry = self._registry
         try:
             with registry.OpenKey(
@@ -602,13 +676,13 @@ class WindowsFirstInstallIntegration:
                 subkeys, value_count, _modified = registry.QueryInfoKey(key)
                 if subkeys:
                     raise SystemIntegrationError("HKCU Uninstall 含未知子键。")
-                values: dict[str, str | int] = {}
+                values: dict[str, tuple[str | int, int]] = {}
                 for index in range(value_count):
                     name, value, value_type = registry.EnumValue(key, index)
                     expected_type = registry.REG_DWORD if isinstance(value, int) else registry.REG_SZ
                     if value_type != expected_type or not isinstance(value, (str, int)):
                         raise SystemIntegrationError("HKCU Uninstall 值类型不可解释。")
-                    values[name] = value
+                    values[name] = (value, value_type)
         except FileNotFoundError:
             return None
         return values
@@ -650,6 +724,41 @@ class WindowsFirstInstallIntegration:
                 )
         except FileNotFoundError as exc:
             raise SystemIntegrationError("升级期间卸载登记已消失。") from exc
+
+    def _restore_upgrade_registration(
+        self,
+        snapshot: UpgradeIntegrationSnapshot,
+    ) -> None:
+        registry = self._registry
+        try:
+            with registry.OpenKey(
+                registry.HKEY_CURRENT_USER,
+                UNINSTALL_KEY,
+                0,
+                registry.KEY_READ | registry.KEY_WRITE,
+            ) as key:
+                registry.SetValueEx(
+                    key,
+                    "DisplayVersion",
+                    0,
+                    registry.REG_SZ,
+                    snapshot.registration.display_version,
+                )
+                if snapshot.estimated_size_exists:
+                    registry.SetValueEx(
+                        key,
+                        "EstimatedSize",
+                        0,
+                        int(snapshot.estimated_size_type),
+                        snapshot.estimated_size_value,
+                    )
+                else:
+                    try:
+                        registry.DeleteValue(key, "EstimatedSize")
+                    except FileNotFoundError:
+                        pass
+        except FileNotFoundError as exc:
+            raise SystemIntegrationError("恢复时卸载登记已消失。") from exc
 
     def _remove_created_uninstall(self) -> None:
         registry = self._registry

@@ -854,20 +854,21 @@ Setup、临时 Uninstall、LanDrop 正常启动和 `pending_cleanup` 共用一�
 → 新版写入 .staging-<new-version>-<transaction>
 → 验证 staging 中的新 payload
 → 确认 LanDrop 已完全退出
-→ 当前 app 整体迁到 .rollback-<old-version>-<transaction>
-→ staging 整体切换为新的 app
+→ 当前 app 与 maintenance 整体迁到 .rollback-<old-version>-<transaction>
+→ staging 中的 app 与 maintenance 整体切换到正式路径
 → 从正式 app 路径执行 LanDrop.exe --self-check
 → 写入卸载登记版本信息和其他必要系统状态
 → 逐项读回验证系统集成
 → 原子发布新的 install.json
 → 写 upgrade_committed / installed 历史
-→ 删除 transaction.json
-→ 成功后删除 rollback / staging
+→ 删除 staging，并尝试删除 rollback
+→ rollback 已不存在，或已原子登记到 install.json.pending_cleanup
+→ 最后删除 transaction.json
 ```
 
-如果新版本提交或系统集成验证失败，必须撤回失败的新 `app`，将 `.rollback-*` 恢复为 `app`，并恢复安装前可恢复的系统登记。禁止把新版文件直接混合覆盖到旧 `_internal`，也不建立长期 `versions\0.x\...` 历史仓库。版本历史由 `install.json` / `install-history.jsonl` 记录，而不是保留旧程序目录或空版本目录。
+如果新版本提交或系统集成验证失败，必须撤回失败的新 `app` 与 `maintenance`，将 `.rollback-*` 中的二者共同恢复，并恢复安装前可恢复的系统登记。`maintenance\Uninstall.exe` 属于随版本升级的正式 payload，不允许形成“app B + Uninstall A”。禁止把新版文件直接混合覆盖到旧 `_internal`，也不建立长期 `versions\0.x\...` 历史仓库。版本历史由 `install.json` / `install-history.jsonl` 记录，而不是保留旧程序目录或空版本目录。
 
-升级提交成功后旧 `.rollback-*` 必须清理。若因 Defender、索引器或临时文件句柄导致删除失败，可以把应用升级状态记为已提交，但必须在 `install.json` 中登记 `pending_cleanup` 并写入 `install-history.jsonl`；后续 Setup 启动或 LanDrop 取得单实例所有权后再次尝试清理。清理器只允许处理安装根内严格符合 LanDrop 命名规则的 `.staging-*` / `.rollback-*` 普通目录，必须拒绝 symlink、junction/reparse point 和路径越界，不得让旧 payload 随升级次数长期累积。
+升级提交成功后旧 `.rollback-*` 必须清理。若因 Defender、索引器或临时文件句柄导致删除失败，可以把应用升级状态记为已提交，但必须在 `install.json` 中登记 `pending_cleanup` 并写入 `install-history.jsonl`；后续 Setup 启动或 LanDrop 取得单实例所有权后再次尝试清理。只有 rollback 已不存在，或其所有权已通过原子写入且读回确认可靠移交给 `install.json.pending_cleanup` 后，才允许删除 `transaction.json`；pending 写入失败时必须保留事务文件，不能留下无人解释的 rollback。清理器只允许处理安装根内严格符合 LanDrop 命名规则的 `.staging-*` / `.rollback-*` 普通目录，必须拒绝 symlink、junction/reparse point 和路径越界，不得让旧 payload 随升级次数长期累积。
 
 卸载器采用“先迁出，再删除程序根”的完整迁出方式。安装目录内的 `maintenance\Uninstall.exe` 先确认 LanDrop 未运行，再生成带创建/过期时间、原卸载器 PID、安装根、当前版本/build id、用户数据选择和源卸载器哈希的规范化 request JSON，把自身与 request 复制到 `%TEMP%\LanDrop\uninstall-<random-id>\`，并通过命令行把独立的随机 nonce 与 `expected_request_sha256` 交给临时副本。临时 Uninstall 验证 request、时效、路径及自身 SHA-256 与源卸载器一致后，必须先取得安装生命周期锁，再重新读取当前权威 `install.json`，确认 product id、version/build id 和固定安装根仍与 request 一致；若安装状态已变化、`transaction.json` 存在或状态无法安全解释，则拒绝旧 request，并要求用户从当前 Windows 卸载入口重新启动 Uninstall。该绑定用于防止陈旧请求、路径错配和异常交接，不扩展成抵御恶意本机用户的复杂认证协议。验证全部通过后，临时副本才严格按系统集成对象清单清理并删除整个 `%LOCALAPPDATA%\Programs\LanDrop`。
 

@@ -107,6 +107,13 @@ class _FailCommitStore(InstallationStateStore):
             raise RuntimeError("commit failure after publish")
 
 
+class _FailPendingStore(InstallationStateStore):
+    def write_install(self, record: InstallRecord) -> None:
+        if record.pending_cleanup:
+            raise RuntimeError("pending publish failure")
+        super().write_install(record)
+
+
 class UpgradeTests(unittest.TestCase):
     def _paths(self, root: Path) -> InstallPaths:
         return InstallPaths(
@@ -188,6 +195,7 @@ class UpgradeTests(unittest.TestCase):
         assert record is not None
         self.assertEqual(record.version, "1.0.0")
         self.assertEqual(paths.main_executable.read_bytes(), b"app-a")
+        self.assertEqual(paths.uninstall_executable.read_bytes(), b"uninstall-a")
         self.assertTrue((paths.app_directory / "_internal" / "a-only.sentinel").is_file())
         self.assertFalse(paths.transaction_state_path.exists())
         self.assertFalse(
@@ -231,10 +239,15 @@ class UpgradeTests(unittest.TestCase):
         store.write_transaction(transaction)
         staging = paths.install_root / staging_name
         rollback = paths.install_root / rollback_name
-        shutil.copytree(service.payload_root / "app", staging)
+        staging.mkdir()
+        shutil.copytree(service.payload_root / "app", staging / "app")
+        shutil.copytree(service.payload_root / "maintenance", staging / "maintenance")
         if stage != "prepared":
-            os.replace(paths.app_directory, rollback)
-            os.replace(staging, paths.app_directory)
+            rollback.mkdir()
+            os.replace(paths.app_directory, rollback / "app")
+            os.replace(paths.maintenance_directory, rollback / "maintenance")
+            os.replace(staging / "app", paths.app_directory)
+            os.replace(staging / "maintenance", paths.maintenance_directory)
             transaction = transaction.advance("app_switched")
             store.write_transaction(transaction)
         if stage in {"integration_written", "integration_verified"}:
@@ -276,7 +289,7 @@ class UpgradeTests(unittest.TestCase):
             self.assertEqual(paths.main_executable.read_bytes(), b"app-b")
             self.assertTrue((paths.app_directory / "_internal" / "b-only.dat").is_file())
             self.assertFalse((paths.app_directory / "_internal" / "a-only.sentinel").exists())
-            self.assertEqual(paths.uninstall_executable.read_bytes(), b"uninstall-a")
+            self.assertEqual(paths.uninstall_executable.read_bytes(), b"uninstall-b")
             self.assertEqual(integration.version, "2.0.0")
             self.assertFalse(paths.transaction_state_path.exists())
 
@@ -284,7 +297,9 @@ class UpgradeTests(unittest.TestCase):
         cases = (
             "staging_verify",
             "app_to_rollback",
+            "maintenance_to_rollback",
             "staging_to_app",
+            "staging_maintenance_to_live",
             "self_check",
             "integration_write",
             "integration_read",
@@ -304,10 +319,20 @@ class UpgradeTests(unittest.TestCase):
                             for child in self._paths(root).install_root.iterdir()
                             if child.name.startswith(".staging-")
                         )
-                        (staging / "LanDrop.exe").write_bytes(b"tampered")
+                        (staging / "app" / "LanDrop.exe").write_bytes(b"tampered")
                     if case == "app_to_rollback" and point == "before_app_to_rollback":
                         raise RuntimeError(case)
+                    if (
+                        case == "maintenance_to_rollback"
+                        and point == "before_maintenance_to_rollback"
+                    ):
+                        raise RuntimeError(case)
                     if case == "staging_to_app" and point == "before_staging_to_app":
+                        raise RuntimeError(case)
+                    if (
+                        case == "staging_maintenance_to_live"
+                        and point == "before_staging_maintenance_to_live"
+                    ):
                         raise RuntimeError(case)
 
                 paths = self._paths(root)
@@ -352,7 +377,9 @@ class UpgradeTests(unittest.TestCase):
             pending_path = paths.install_root / record.pending_cleanup[0]
             self.assertTrue(pending_path.is_dir())
             self.assertEqual(paths.main_executable.read_bytes(), b"app-b")
+            self.assertEqual(paths.uninstall_executable.read_bytes(), b"uninstall-b")
             self.assertEqual(integration.version, "2.0.0")
+            self.assertFalse(paths.transaction_state_path.exists())
 
             cleanup = retry_pending_cleanup(paths, state_store=store)
 
@@ -386,7 +413,7 @@ class UpgradeTests(unittest.TestCase):
             same_manifest = build_payload_manifest(
                 service.payload_root,
                 version="1.0.0",
-                build_id="same-build",
+                build_id="build-a",
             )
             same = UpgradeService(
                 paths=paths,
@@ -404,6 +431,118 @@ class UpgradeTests(unittest.TestCase):
             assert cleaned is not None
             self.assertFalse(cleaned.pending_cleanup)
             self.assertEqual(paths.main_executable.read_bytes(), b"app-a")
+
+    def test_commit_cleanup_crash_keeps_transaction_until_restart_recovery(self) -> None:
+        with temporary_directory() as temporary:
+            root = Path(temporary)
+
+            def checkpoint(point: str) -> None:
+                if point == "before_committed_cleanup":
+                    raise RuntimeError("simulated crash before cleanup")
+
+            service, paths, store, integration = self._service(
+                root,
+                checkpoint=checkpoint,
+            )
+            first = service.upgrade()
+
+            self.assertTrue(first.committed)
+            self.assertEqual(first.result, "partial")
+            self.assertTrue(paths.transaction_state_path.is_file())
+            committed = store.read_install(required=True)
+            assert committed is not None
+            self.assertEqual(committed.version, "2.0.0")
+            transaction = store.read_transaction(required=True)
+            assert transaction is not None
+            rollback = paths.install_root / str(transaction.rollback_directory)
+            self.assertTrue(rollback.is_dir())
+
+            recovered = UpgradeService(
+                paths=paths,
+                payload_root=service.payload_root,
+                manifest=service.manifest,
+                integration=integration,
+                self_check=lambda _path: True,
+                state_store=store,
+                lifecycle_lock=_FakeLock(),  # type: ignore[arg-type]
+                executable_running=lambda _path: False,
+            ).upgrade()
+
+            self.assertTrue(recovered.verified, recovered.message)
+            self.assertTrue(recovered.committed)
+            self.assertFalse(paths.transaction_state_path.exists())
+            self.assertFalse(rollback.exists())
+            self.assertEqual(paths.main_executable.read_bytes(), b"app-b")
+            self.assertEqual(paths.uninstall_executable.read_bytes(), b"uninstall-b")
+
+    def test_pending_publish_failure_keeps_transaction_as_cleanup_owner(self) -> None:
+        with temporary_directory() as temporary:
+            root = Path(temporary)
+            paths = self._paths(root)
+            store = _FailPendingStore(paths)
+
+            def fail_rollback_cleanup(path: Path, owned_paths: InstallPaths) -> None:
+                if path.name.startswith(".rollback-"):
+                    raise PermissionError("locked")
+                _remove_transaction_tree(path, owned_paths)
+
+            service, paths, store, _integration = self._service(
+                root,
+                state_store=store,
+                remove_tree=fail_rollback_cleanup,
+            )
+
+            outcome = service.upgrade()
+
+            self.assertTrue(outcome.committed)
+            self.assertEqual(outcome.result, "partial")
+            record = store.read_install(required=True)
+            assert record is not None
+            self.assertEqual(record.version, "2.0.0")
+            self.assertFalse(record.pending_cleanup)
+            self.assertTrue(paths.transaction_state_path.is_file())
+
+    def test_pending_cleanup_removes_successes_and_preserves_only_failures(self) -> None:
+        with temporary_directory() as temporary:
+            root = Path(temporary)
+            paths = self._paths(root)
+            store = self._prepare_a(paths)
+            first = ".rollback-0.8.0-11111111111111111111111111111111"
+            second = ".rollback-0.9.0-22222222222222222222222222222222"
+            for name in (first, second):
+                directory = paths.install_root / name
+                directory.mkdir()
+                (directory / "old.dat").write_bytes(name.encode("ascii"))
+            current = store.read_install(required=True)
+            assert current is not None
+            store.write_install(
+                InstallRecord.create(
+                    paths,
+                    version=current.version,
+                    build_id=current.build_id,
+                    installed_at=current.installed_at,
+                    pending_cleanup=(first, second),
+                )
+            )
+
+            def remove_one(path: Path, owned_paths: InstallPaths) -> None:
+                if path.name == second:
+                    raise PermissionError("still locked")
+                _remove_transaction_tree(path, owned_paths)
+
+            result = retry_pending_cleanup(
+                paths,
+                state_store=store,
+                remove_tree=remove_one,
+            )
+
+            self.assertEqual((result.attempted, result.removed), (2, 1))
+            self.assertEqual(result.remaining, (second,))
+            self.assertFalse((paths.install_root / first).exists())
+            self.assertTrue((paths.install_root / second).is_dir())
+            updated = store.read_install(required=True)
+            assert updated is not None
+            self.assertEqual(updated.pending_cleanup, (second,))
 
     def test_restart_recovers_each_precommit_transaction_stage_then_upgrades(self) -> None:
         for stage in (
@@ -481,7 +620,7 @@ class UpgradeTests(unittest.TestCase):
             same_manifest = build_payload_manifest(
                 service.payload_root,
                 version="1.0.0",
-                build_id="same-build",
+                build_id="build-a",
             )
             same = UpgradeService(
                 paths=paths,
@@ -493,6 +632,24 @@ class UpgradeTests(unittest.TestCase):
                 executable_running=lambda _path: False,
             ).upgrade()
             self.assertEqual(same.result, "already-installed")
+            self.assertEqual(paths.main_executable.read_bytes(), b"app-a")
+
+            different_build_manifest = build_payload_manifest(
+                service.payload_root,
+                version="1.0.0",
+                build_id="different-build",
+            )
+            different_build = UpgradeService(
+                paths=paths,
+                payload_root=service.payload_root,
+                manifest=different_build_manifest,
+                integration=_FakeUpgradeIntegration(),
+                state_store=store,
+                lifecycle_lock=_FakeLock(),  # type: ignore[arg-type]
+                executable_running=lambda _path: False,
+            ).upgrade()
+            self.assertFalse(different_build.verified)
+            self.assertIn("不同 build id", different_build.message)
             self.assertEqual(paths.main_executable.read_bytes(), b"app-a")
 
             lower_manifest = build_payload_manifest(

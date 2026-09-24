@@ -179,6 +179,10 @@ class UpgradeService:
 
             comparison = compare_versions(self.manifest.version, current.version)
             if comparison == 0:
+                if self.manifest.build_id != current.build_id:
+                    raise UpgradeError(
+                        "检测到同版本但不同 build id；不支持覆盖或修复安装。"
+                    )
                 return UpgradeOutcome(
                     result="already-installed",
                     verified=True,
@@ -196,7 +200,8 @@ class UpgradeService:
                 raise UpgradeError("LanDrop 正在运行；请从托盘退出后重试升级。")
 
             verify_payload(self.payload_root, self.manifest)
-            app_manifest = _app_manifest(self.manifest)
+            app_manifest = _subtree_manifest(self.manifest, "app")
+            maintenance_manifest = _subtree_manifest(self.manifest, "maintenance")
             old_plan = IntegrationPlan.create(
                 self.paths,
                 version=current.version,
@@ -244,17 +249,50 @@ class UpgradeService:
                 self.paths,
             )
             staging.mkdir()
-            _copy_manifest_payload(self.payload_root / "app", staging, app_manifest)
+            _copy_manifest_payload(
+                self.payload_root / "app",
+                staging / "app",
+                app_manifest,
+            )
+            _copy_manifest_payload(
+                self.payload_root / "maintenance",
+                staging / "maintenance",
+                maintenance_manifest,
+            )
             self.checkpoint("before_staging_verify")
-            verify_payload(staging, app_manifest)
+            verify_payload(staging / "app", app_manifest)
+            verify_payload(staging / "maintenance", maintenance_manifest)
             if self.executable_running(self.paths.main_executable):
                 raise UpgradeError("LanDrop 在升级提交前仍在运行。")
 
             report("app_switch")
+            rollback.mkdir()
             self.checkpoint("before_app_to_rollback")
-            _rename_owned_directory(self.paths.app_directory, rollback, self.paths)
+            _rename_owned_directory(
+                self.paths.app_directory,
+                rollback / "app",
+                self.paths,
+            )
+            self.checkpoint("before_maintenance_to_rollback")
+            _rename_owned_directory(
+                self.paths.maintenance_directory,
+                rollback / "maintenance",
+                self.paths,
+            )
             self.checkpoint("before_staging_to_app")
-            _rename_owned_directory(staging, self.paths.app_directory, self.paths)
+            _rename_owned_directory(
+                staging / "app",
+                self.paths.app_directory,
+                self.paths,
+            )
+            self.checkpoint("before_staging_maintenance_to_live")
+            _rename_owned_directory(
+                staging / "maintenance",
+                self.paths.maintenance_directory,
+                self.paths,
+            )
+            verify_payload(self.paths.app_directory, app_manifest)
+            verify_payload(self.paths.maintenance_directory, maintenance_manifest)
             app_switched = True
             transaction = transaction.advance("app_switched")
             self.state_store.write_transaction(transaction)
@@ -316,34 +354,22 @@ class UpgradeService:
             except Exception as exc:
                 warning_parts.append(f"安装历史写入失败：{exc}")
 
-            self.state_store.remove_transaction()
-
             report("cleanup")
             try:
                 self.checkpoint("before_committed_cleanup")
-                self.remove_tree(rollback, self.paths)
-            except Exception as exc:
-                pending_record = InstallRecord.create(
-                    self.paths,
-                    version=committed_record.version,
-                    build_id=committed_record.build_id,
-                    installed_at=committed_record.installed_at,
-                    pending_cleanup=(rollback.name,),
+                cleanup_pending, cleanup_warning = self._finalize_committed_cleanup(
+                    committed_record,
+                    transaction,
+                    staging,
+                    rollback,
                 )
-                self.state_store.write_install(pending_record)
-                try:
-                    self.history.append(
-                        "cleanup_pending",
-                        version=pending_record.version,
-                        result="pending",
-                        from_version=current.version,
-                        to_version=pending_record.version,
-                        transaction_id=transaction.transaction_id,
-                        details={"directory": rollback.name},
-                    )
-                except Exception as history_error:
-                    warning_parts.append(f"清理历史写入失败：{history_error}")
-                warning_parts.append(f"旧 payload 将稍后重试清理：{exc}")
+                if cleanup_warning:
+                    warning_parts.append(cleanup_warning)
+            except Exception:
+                # transaction.json deliberately remains authoritative until
+                # rollback is gone or pending_cleanup has been published.
+                raise
+            if cleanup_pending:
                 report("completed")
                 return UpgradeOutcome(
                     result="success-with-warning",
@@ -419,6 +445,67 @@ class UpgradeService:
             if acquired:
                 self.lifecycle_lock.close()
 
+    def _finalize_committed_cleanup(
+        self,
+        committed_record: InstallRecord,
+        transaction: TransactionRecord,
+        staging: Path,
+        rollback: Path,
+    ) -> tuple[bool, str]:
+        """Transfer ownership before deleting the transaction journal."""
+        if os.path.lexists(staging):
+            self.remove_tree(staging, self.paths)
+        try:
+            if os.path.lexists(rollback):
+                self.remove_tree(rollback, self.paths)
+        except Exception as exc:
+            pending_names = tuple(
+                dict.fromkeys((*committed_record.pending_cleanup, rollback.name))
+            )
+            pending_record = InstallRecord.create(
+                self.paths,
+                version=committed_record.version,
+                build_id=committed_record.build_id,
+                installed_at=committed_record.installed_at,
+                pending_cleanup=pending_names,
+            )
+            self.state_store.write_install(pending_record)
+            confirmed = self.state_store.read_install(required=True)
+            if confirmed is None or confirmed.pending_cleanup != pending_names:
+                raise UpgradeError("pending_cleanup 发布后读回不一致。")
+            self.state_store.remove_transaction()
+            try:
+                self.history.append(
+                    "cleanup_pending",
+                    version=pending_record.version,
+                    result="pending",
+                    from_version=transaction.source_version,
+                    to_version=pending_record.version,
+                    transaction_id=transaction.transaction_id,
+                    details={"directory": rollback.name},
+                )
+            except Exception:
+                pass
+            return True, f"旧 payload 将稍后重试清理：{exc}"
+
+        if rollback.name in committed_record.pending_cleanup:
+            remaining = tuple(
+                name for name in committed_record.pending_cleanup if name != rollback.name
+            )
+            cleaned_record = InstallRecord.create(
+                self.paths,
+                version=committed_record.version,
+                build_id=committed_record.build_id,
+                installed_at=committed_record.installed_at,
+                pending_cleanup=remaining,
+            )
+            self.state_store.write_install(cleaned_record)
+            confirmed = self.state_store.read_install(required=True)
+            if confirmed is None or confirmed.pending_cleanup != remaining:
+                raise UpgradeError("pending_cleanup 清理后读回不一致。")
+        self.state_store.remove_transaction()
+        return False, ""
+
     def _recover_interrupted_upgrade(
         self,
         report: Callable[[str], None],
@@ -462,7 +549,8 @@ class UpgradeService:
             self.paths.install_root / transaction.rollback_directory,
             self.paths,
         )
-        app_manifest = _app_manifest(self.manifest)
+        app_manifest = _subtree_manifest(self.manifest, "app")
+        maintenance_manifest = _subtree_manifest(self.manifest, "maintenance")
 
         if (
             current.version == transaction.target_version
@@ -471,6 +559,7 @@ class UpgradeService:
             if transaction.stage != "integration_verified":
                 raise UpgradeError("install.json 已是目标版本，但事务尚未完成系统集成验证。")
             verify_payload(self.paths.app_directory, app_manifest)
+            verify_payload(self.paths.maintenance_directory, maintenance_manifest)
             estimated_size = max(
                 1,
                 (sum(entry.size for entry in self.manifest.files) + 1023) // 1024,
@@ -480,35 +569,12 @@ class UpgradeService:
                 version=transaction.target_version,
                 estimated_size_kib=estimated_size,
             )
-            if os.path.lexists(staging):
-                self.remove_tree(staging, self.paths)
-            self.state_store.remove_transaction()
-            warning = ""
-            if os.path.lexists(rollback):
-                try:
-                    self.remove_tree(rollback, self.paths)
-                except Exception as exc:
-                    pending = InstallRecord.create(
-                        self.paths,
-                        version=current.version,
-                        build_id=current.build_id,
-                        installed_at=current.installed_at,
-                        pending_cleanup=(rollback.name,),
-                    )
-                    self.state_store.write_install(pending)
-                    warning = f"旧 payload 将稍后重试清理：{exc}"
-                    try:
-                        self.history.append(
-                            "cleanup_pending",
-                            version=current.version,
-                            result="pending",
-                            from_version=transaction.source_version,
-                            to_version=current.version,
-                            transaction_id=transaction.transaction_id,
-                            details={"directory": rollback.name},
-                        )
-                    except Exception:
-                        pass
+            cleanup_pending, warning = self._finalize_committed_cleanup(
+                current,
+                transaction,
+                staging,
+                rollback,
+            )
             try:
                 self.history.append(
                     "upgrade_committed",
@@ -527,7 +593,7 @@ class UpgradeService:
                 committed=True,
                 rollback_attempted=False,
                 rollback_succeeded=None,
-                cleanup_pending=bool(warning),
+                cleanup_pending=cleanup_pending,
                 message=f"已恢复并确认 LanDrop {current.version} 的升级提交。",
                 warning=warning,
             )
@@ -539,26 +605,19 @@ class UpgradeService:
             raise UpgradeError("残留事务与当前权威 install.json 的源/目标身份均不一致。")
 
         report("rollback")
-        target_is_active = _payload_matches(self.paths.app_directory, app_manifest)
-        if os.path.lexists(rollback):
-            if not rollback.is_dir() or is_reparse_object(rollback):
-                raise UpgradeError("残留 rollback 不是安全的普通目录。")
-            if os.path.lexists(self.paths.app_directory):
-                if os.path.lexists(staging):
-                    raise UpgradeError("恢复时 app 与 staging 同时存在，拒绝猜测新版去向。")
-                _rename_owned_directory(self.paths.app_directory, staging, self.paths)
-            _rename_owned_directory(rollback, self.paths.app_directory, self.paths)
-        else:
-            if not self.paths.app_directory.is_dir() or is_reparse_object(
-                self.paths.app_directory
-            ):
-                raise UpgradeError("旧 app 与 rollback 均缺失，无法恢复源版本。")
-            if target_is_active:
-                raise UpgradeError("新版 app 已激活但旧 rollback 缺失，无法恢复源版本。")
+        _restore_source_payload(
+            self.paths,
+            staging,
+            rollback,
+            app_manifest,
+            maintenance_manifest,
+        )
 
         self.integration.restore_upgrade(snapshot)
         if os.path.lexists(staging):
             self.remove_tree(staging, self.paths)
+        if os.path.lexists(rollback):
+            self.remove_tree(rollback, self.paths)
         _validate_installed_layout(self.paths, current)
         self.state_store.remove_transaction()
         try:
@@ -612,16 +671,18 @@ class UpgradeService:
         if current is None or transaction is None:
             return errors
         try:
-            if rollback is not None and rollback.exists():
-                if self.paths.app_directory.exists():
-                    if staging is None or staging.exists():
-                        raise UpgradeError("无法为失败的新版 app 建立回退暂存路径。")
-                    _rename_owned_directory(self.paths.app_directory, staging, self.paths)
-                _rename_owned_directory(rollback, self.paths.app_directory, self.paths)
+            if staging is not None and rollback is not None:
+                _restore_source_payload(
+                    self.paths,
+                    staging,
+                    rollback,
+                    _subtree_manifest(self.manifest, "app"),
+                    _subtree_manifest(self.manifest, "maintenance"),
+                )
             elif app_switched:
-                raise UpgradeError("旧 app rollback 已丢失，无法恢复 A。")
+                raise UpgradeError("缺少受控 staging/rollback 路径，无法恢复 A。")
         except Exception as restore_error:
-            errors.append(f"app 恢复：{restore_error}")
+            errors.append(f"payload 恢复：{restore_error}")
 
         if integration_started and snapshot is not None:
             try:
@@ -642,7 +703,10 @@ class UpgradeService:
                 except Exception as cleanup_error:
                     errors.append(f"staging：{cleanup_error}")
             if rollback is not None and rollback.exists():
-                errors.append("rollback 目录在恢复后仍存在。")
+                try:
+                    self.remove_tree(rollback, self.paths)
+                except Exception as cleanup_error:
+                    errors.append(f"rollback：{cleanup_error}")
         if not errors:
             try:
                 self.state_store.remove_transaction()
@@ -722,6 +786,9 @@ def inspect_setup_state(
     if comparison < 0:
         disposition = "downgrade_blocked"
         message = f"不支持从 {current.version} 自动降级到 {manifest.version}。"
+    elif comparison == 0 and manifest.build_id != current.build_id:
+        disposition = "build_mismatch"
+        message = "检测到同版本但不同 build id；不支持覆盖或修复安装。"
     elif comparison == 0:
         disposition = "already_installed"
         message = f"当前版本 {current.version} 已安装。"
@@ -772,13 +839,48 @@ def retry_pending_cleanup(
             installed_at=record.installed_at,
             pending_cleanup=tuple(remaining),
         )
-        store.write_install(updated)
+        try:
+            store.write_install(updated)
+        except Exception as exc:
+            errors.append(f"pending_cleanup 状态更新失败：{exc}")
+            try:
+                audit.append(
+                    "cleanup_pending",
+                    version=record.version,
+                    result="state_update_failed",
+                    details={
+                        "removed_count": removed,
+                        "remaining_count": len(record.pending_cleanup),
+                    },
+                )
+            except Exception:
+                pass
+            return CleanupResult(
+                attempted=len(record.pending_cleanup),
+                removed=removed,
+                remaining=record.pending_cleanup,
+                errors=tuple(errors),
+            )
         try:
             audit.append(
                 "cleanup_completed",
                 version=record.version,
                 result="ok" if not remaining else "partial",
                 details={"removed_count": removed, "remaining_count": len(remaining)},
+            )
+        except Exception:
+            pass
+    elif errors:
+        try:
+            audit.append(
+                "cleanup_pending",
+                version=record.version,
+                result="retry_failed",
+                details={
+                    "attempted_count": len(record.pending_cleanup),
+                    "remaining_count": len(remaining),
+                    "errors": errors,
+                },
             )
         except Exception:
             pass
@@ -885,15 +987,16 @@ def _validate_installed_layout(paths: InstallPaths, record: InstallRecord) -> No
             raise UpgradeError(f"安装根包含 reparse object：{child.name}")
 
 
-def _app_manifest(manifest: PayloadManifest) -> PayloadManifest:
-    prefix = "app/"
+def _subtree_manifest(manifest: PayloadManifest, subtree: str) -> PayloadManifest:
+    prefix = f"{subtree}/"
     files = tuple(
         PayloadFile(entry.relative_path[len(prefix) :], entry.size, entry.sha256)
         for entry in manifest.files
         if entry.relative_path.startswith(prefix)
     )
-    if not files or not any(entry.relative_path == "LanDrop.exe" for entry in files):
-        raise UpgradeError("payload manifest 不包含完整 app 子树。")
+    required = "LanDrop.exe" if subtree == "app" else "Uninstall.exe"
+    if not files or not any(entry.relative_path == required for entry in files):
+        raise UpgradeError(f"payload manifest 不包含完整 {subtree} 子树。")
     return PayloadManifest(
         product_id=manifest.product_id,
         version=manifest.version,
@@ -901,6 +1004,42 @@ def _app_manifest(manifest: PayloadManifest) -> PayloadManifest:
         files=files,
         schema_version=manifest.schema_version,
     )
+
+
+def _restore_source_payload(
+    paths: InstallPaths,
+    staging: Path,
+    rollback: Path,
+    app_manifest: PayloadManifest,
+    maintenance_manifest: PayloadManifest,
+) -> None:
+    for container in (staging, rollback):
+        if os.path.lexists(container) and (
+            not container.is_dir() or is_reparse_object(container)
+        ):
+            raise UpgradeError(f"事务容器不是安全的普通目录：{container}")
+    components = (
+        ("app", paths.app_directory, app_manifest),
+        ("maintenance", paths.maintenance_directory, maintenance_manifest),
+    )
+    for name, live, target_manifest in components:
+        staged = staging / name
+        old = rollback / name
+        if os.path.lexists(old):
+            if not old.is_dir() or is_reparse_object(old):
+                raise UpgradeError(f"旧 {name} rollback 不是安全的普通目录。")
+            if os.path.lexists(live):
+                if os.path.lexists(staged):
+                    raise UpgradeError(
+                        f"恢复 {name} 时 live 与 staging 同时存在，拒绝猜测。"
+                    )
+                _rename_owned_directory(live, staged, paths)
+            _rename_owned_directory(old, live, paths)
+            continue
+        if not live.is_dir() or is_reparse_object(live):
+            raise UpgradeError(f"旧 {name} 与 rollback 均缺失，无法恢复源版本。")
+        if _payload_matches(live, target_manifest):
+            raise UpgradeError(f"新版 {name} 已激活但旧 rollback 缺失。")
 
 
 def _payload_matches(root: Path, manifest: PayloadManifest) -> bool:

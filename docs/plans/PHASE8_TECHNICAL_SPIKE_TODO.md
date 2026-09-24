@@ -461,6 +461,7 @@ Setup 识别既有 `install.json` 后：
 - 验证当前版本和 app 基本完整；
 - 拒绝在无法信任的安装记录上盲目覆盖；
 - 不支持自动降级，除非未来另行明确设计；
+- 同版本且 build id 相同才视为“已经安装”；同版本但 build id 不同应拒绝覆盖，并明确提示不支持 Repair/Reinstall；
 - 发现未完成 staging/rollback 时先进入恢复/清理判断，不能直接开始下一次升级；
 - LanDrop 正在运行时阻止升级。
 
@@ -474,8 +475,8 @@ Setup 识别既有 `install.json` 后：
 → 新 payload → .staging-<new>-<tx>
 → 完整校验
 → 确认 LanDrop 未运行
-→ current app → .rollback-<old>-<tx>
-→ staging → app
+→ current app + maintenance → .rollback-<old>-<tx>
+→ staging 中的 app + maintenance → 正式路径
 → transaction.json = app_switched
 → 从正式 app 路径执行 LanDrop.exe --self-check
 → 更新 DisplayVersion / EstimatedSize 等必要登记（保持用户现有 Run/StartupApproved 状态）
@@ -484,19 +485,20 @@ Setup 识别既有 `install.json` 后：
 → transaction.json = integration_verified
 → 原子发布新的 install.json
 → 写 upgrade_committed / installed 历史
-→ 删除 transaction.json
-→ 删除 rollback/staging
+→ 删除 staging，并尝试删除 rollback
+→ rollback 已不存在，或已原子登记到 install.json.pending_cleanup
+→ 最后删除 transaction.json
 → 写 old_payload_removed
 ```
 
-稳定系统入口仍指向 `app\LanDrop.exe`，不因版本变化修改目标位置。
+稳定系统入口仍指向 `app\LanDrop.exe`，不因版本变化修改目标位置。`maintenance\Uninstall.exe` 属于随版本升级的正式 payload，必须与 `app` 在同一事务中切换；commit 前失败时两者必须共同恢复到 A，不允许形成“app B + Uninstall A”。
 
 ### P8-S17：升级失败回滚
 
 至少对以下失败点做可恢复设计：
 
 - staging 校验失败；
-- app 切换失败；
+- app / maintenance 切换失败；
 - 新版基础自检失败；
 - 卸载登记/快捷方式读回失败；
 - `install.json` 最终原子发布失败。
@@ -513,6 +515,8 @@ Setup 识别既有 `install.json` 后：
 - Setup 下一次启动时重试；
 - LanDrop 在取得主程序单实例所有权且另行取得安装生命周期锁后也可做低风险重试；
 - 成功后删除记录并写 `cleanup_completed`。
+
+`transaction.json` 到 `install.json.pending_cleanup` 的所有权交接必须无空窗：只有 `.rollback-*` 已经不存在，或其路径已成功原子写入并读回确认在 `pending_cleanup` 中，才允许删除 `transaction.json`。如果 pending 写入失败，事务文件必须保留，供下次 Setup 按“B 已提交、旧 payload 待收尾”恢复，不能产生无人解释的 rollback 目录。
 
 安全规则：
 

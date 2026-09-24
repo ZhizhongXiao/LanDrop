@@ -10,6 +10,7 @@ import landrop.gui as gui
 from landrop.install_contract import InstallPaths, transaction_directory_name
 from landrop.install_lock import InstallLifecycleLockError
 from landrop.install_state import InstallationStateStore, TransactionRecord
+from landrop.upgrade import CleanupResult
 from tests.support import temporary_directory
 
 
@@ -88,6 +89,44 @@ class DesktopStartupGateTests(unittest.TestCase):
             gui._desktop_window_visibility(True),
             {"hidden": True, "focus": False},
         )
+
+    def test_pending_cleanup_failure_does_not_block_committed_app_start(self) -> None:
+        with temporary_directory() as temporary:
+            events: list[str] = []
+            desktop = _FakeDesktopInstance(events)
+
+            def cleanup_retry() -> CleanupResult:
+                events.append("cleanup.failed")
+                return CleanupResult(
+                    attempted=1,
+                    removed=0,
+                    remaining=(
+                        ".rollback-1.0.0-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    ),
+                    errors=("locked",),
+                )
+
+            instance, primary = gui._acquire_desktop_startup_ownership(
+                Path(temporary) / "data",
+                install_paths=self._paths(Path(temporary)),
+                lifecycle_lock=_FakeLifecycleLock(events),  # type: ignore[arg-type]
+                state_store=_RecordingStateStore(events),  # type: ignore[arg-type]
+                single_instance=desktop,  # type: ignore[arg-type]
+                cleanup_retry=cleanup_retry,
+            )
+
+            self.assertIs(instance, desktop)
+            self.assertTrue(primary)
+            self.assertEqual(
+                events,
+                [
+                    "lifecycle.acquire",
+                    "transaction.check",
+                    "desktop.acquire",
+                    "cleanup.failed",
+                    "lifecycle.close",
+                ],
+            )
         self.assertEqual(
             gui._desktop_window_visibility(False),
             {"hidden": False, "focus": True},
