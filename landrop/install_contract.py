@@ -174,6 +174,34 @@ class InstallPaths:
         )
 
 
+def install_paths_for_current_windows_user() -> InstallPaths:
+    """Resolve fixed paths plus the user's redirected Windows Desktop folder."""
+    paths = InstallPaths.from_environment()
+    if os.name != "nt":
+        return paths
+    try:
+        import winreg
+
+        shell_folders = (
+            r"Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders"
+        )
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, shell_folders) as key:
+            raw, value_type = winreg.QueryValueEx(key, "Desktop")
+        if value_type not in {winreg.REG_SZ, winreg.REG_EXPAND_SZ} or not isinstance(raw, str):
+            return paths
+        desktop = Path(os.path.expandvars(raw))
+        if desktop.is_absolute():
+            return InstallPaths(
+                paths.local_app_data,
+                paths.roaming_app_data,
+                desktop,
+                paths.temp_directory,
+            )
+    except OSError:
+        pass
+    return paths
+
+
 def lifecycle_mutex_name(paths: InstallPaths) -> str:
     """Return a stable per-user mutex name without exposing the user path."""
     identity = os.path.normcase(os.path.abspath(paths.local_app_data))

@@ -1,6 +1,6 @@
 """LanDrop single-file Uninstall artifact entry point."""
 
-from landrop.uninstall_stub import main
+from landrop.uninstall_app import main
 
 
 if __name__ == "__main__":

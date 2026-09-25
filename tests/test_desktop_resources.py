@@ -72,6 +72,10 @@ class DesktopResourceTests(unittest.TestCase):
         self.assertIn('resource_path("assets/LanDrop-tray.ico")', tray_source)
         self.assertNotIn('resource_path("assets/LanDrop.ico")', tray_source)
 
+        uninstall_spec = (PROJECT_ROOT / "Uninstall.spec").read_text(encoding="utf-8")
+        self.assertIn('project_root / "ui"', uninstall_spec)
+        self.assertIn('project_root / "scripts" / "shortcut-bridge.ps1"', uninstall_spec)
+
     def test_product_icon_assets_have_transparent_rounded_corners(self) -> None:
         for name in ("LanDrop.ico", "LanDrop-icon-preview.png"):
             with Image.open(PROJECT_ROOT / "assets" / name) as icon:
@@ -85,6 +89,7 @@ class DesktopResourceTests(unittest.TestCase):
             PROJECT_ROOT / "ui" / "wizard" / "js" / "wizard.js",
             PROJECT_ROOT / "ui" / "setup" / "js" / "setup.js",
             PROJECT_ROOT / "ui" / "uninstall" / "js" / "uninstall.js",
+            PROJECT_ROOT / "ui" / "uninstall" / "css" / "uninstall.css",
         )
         self.assertTrue(all(path.is_file() for path in expected))
         for page_name in ("setup", "uninstall"):

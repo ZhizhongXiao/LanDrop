@@ -7,6 +7,7 @@
   <title>卸载 LanDrop</title>
   <link rel="stylesheet" href="../desktop/css/tokens.css">
   <link rel="stylesheet" href="../wizard/css/wizard.css">
+  <link rel="stylesheet" href="css/uninstall.css">
 </head>
 <body>
   <main class="wizard-shell">
@@ -23,30 +24,35 @@
       <div class="wizard-content">
         <section class="wizard-page active">
           <p class="wizard-kicker">UNINSTALL</p><h1>卸载 LanDrop</h1>
-          <p class="wizard-lead">此可执行文件是首次安装闭环所需的独立卸载器构建产物。</p>
-          <div class="preview-note">Phase 8B 尚未启用卸载执行；当前界面不会停止 LanDrop、删除文件或修改系统。</div>
+          <p class="wizard-lead">卸载程序文件和由 LanDrop 创建且仍匹配的当前用户系统入口。</p>
+          <div id="uninstallIntro" class="preview-note">正在核对安装状态…</div>
         </section>
         <section class="wizard-page">
           <p class="wizard-kicker">USER DATA</p><h1>选择要保留的数据</h1>
           <p class="wizard-lead">默认保留配置、日志和可信客户机。删除这些数据必须由用户分别明确选择。</p>
           <div class="choice-list">
-            <label class="choice"><input type="checkbox"><span><strong>删除配置</strong><small>包括共享目录、接收目录和上传上限。</small></span></label>
-            <label class="choice"><input type="checkbox"><span><strong>删除日志</strong><small>清理 %LOCALAPPDATA%\LanDrop\logs。</small></span></label>
-            <label class="choice"><input type="checkbox"><span><strong>删除可信客户机</strong><small>以后再次安装时，所有浏览器都需要重新配对。</small></span></label>
+            <label class="choice"><input id="deleteConfig" type="checkbox"><span><strong>删除配置</strong><small>删除 config.json；不会删除配置中引用的收发目录。</small></span></label>
+            <label class="choice"><input id="deleteLogs" type="checkbox"><span><strong>删除日志</strong><small>只清理 LanDrop 已知日志白名单；未知文件保留。</small></span></label>
+            <label class="choice"><input id="deleteTrusted" type="checkbox"><span><strong>删除可信客户机</strong><small>以后再次安装时，所有浏览器都需要重新配对。</small></span></label>
           </div>
         </section>
         <section class="wizard-page">
           <p class="wizard-kicker">CONFIRM</p><h1>确认卸载</h1>
-          <p class="wizard-lead">后续正式流程只会清理对象清单内的快捷方式、开机启动项和卸载登记；不会修改防火墙，也不会碰触用户收发文件。</p>
+          <p class="wizard-lead">只清理对象清单内仍属于 LanDrop 的快捷方式、开机启动项和卸载登记；不会修改防火墙，也不会碰触用户收发文件。</p>
           <div class="summary-list">
-            <div class="summary-row"><strong>传输服务</strong><span>停止并关闭 TCP 8000</span></div>
+            <div class="summary-row"><strong>运行状态</strong><span>LanDrop 必须已从托盘退出</span></div>
             <div class="summary-row"><strong>系统入口</strong><span>清理由安装器创建的项目</span></div>
             <div class="summary-row"><strong>收发文件</strong><span>始终保留</span></div>
           </div>
-          <div id="previewResult" class="preview-note">尚未执行卸载。</div>
+          <div id="previewResult" class="preview-note" aria-live="polite">尚未执行卸载。</div>
+        </section>
+        <section id="executionPanel" class="execution-panel" hidden>
+          <p class="wizard-kicker">UNINSTALLING</p><h1 id="executionTitle">正在卸载 LanDrop</h1>
+          <p id="executionMessage" class="wizard-lead">正在验证卸载请求和当前安装状态…</p>
+          <div id="executionResiduals" class="preview-note" hidden></div>
         </section>
       </div>
-      <footer class="wizard-footer"><span class="wizard-version">LanDrop · Phase 8B 卸载器占位构建</span><div class="footer-actions"><button id="back" class="wizard-button" type="button">返回</button><button id="next" class="wizard-button primary" type="button">继续</button></div></footer>
+      <footer class="wizard-footer"><span id="uninstallVersion" class="wizard-version">LanDrop Uninstall</span><div class="footer-actions"><button id="back" class="wizard-button" type="button">返回</button><button id="next" class="wizard-button primary" type="button">继续</button></div></footer>
     </section>
   </main>
   <script src="../shared/js/theme.js"></script>

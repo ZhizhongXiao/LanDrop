@@ -1,0 +1,13 @@
+.execution-panel {
+  min-height: 360px;
+  padding: 12px 4px;
+}
+
+.execution-panel[hidden] {
+  display: none;
+}
+
+.preview-note.error {
+  border-color: color-mix(in srgb, var(--danger, #d94a4a) 52%, transparent);
+  color: var(--danger, #b3261e);
+}

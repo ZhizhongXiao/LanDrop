@@ -206,6 +206,19 @@ class FirstInstallIntegration(Protocol):
 
 
 @dataclass(frozen=True, slots=True)
+class SystemIntegrationRemovalResult:
+    """Exact allowlisted objects removed, absent, or deliberately preserved."""
+
+    removed: tuple[str, ...]
+    absent: tuple[str, ...]
+    residuals: tuple[str, ...]
+
+    @property
+    def complete(self) -> bool:
+        return not self.residuals
+
+
+@dataclass(frozen=True, slots=True)
 class UpgradeIntegrationSnapshot:
     """Exact pre-upgrade values that Setup must preserve or restore."""
 
@@ -518,6 +531,75 @@ class WindowsFirstInstallIntegration:
             errors.append(str(exc))
         if errors:
             raise SystemIntegrationError("系统集成回滚不完整：" + "；".join(errors))
+
+    def remove_owned(self, plan: IntegrationPlan) -> SystemIntegrationRemovalResult:
+        """Remove only objects that still exactly belong to this LanDrop install.
+
+        A user-modified object is preserved and reported instead of being guessed
+        at or overwritten.  Each allowlisted object is handled independently so
+        one residual does not hide the cleanup result of the other objects.
+        """
+        removed: list[str] = []
+        absent: list[str] = []
+        residuals: list[str] = []
+
+        def remove_shortcut(object_id: str, expected: ShortcutSpec) -> None:
+            try:
+                current = self._shortcuts.read(expected.path)
+                if current is None:
+                    absent.append(object_id)
+                elif current != expected:
+                    residuals.append(f"{object_id} 已被修改，已保留。")
+                else:
+                    self._shortcuts.remove_created(expected.path)
+                    if self._shortcuts.read(expected.path) is not None:
+                        residuals.append(f"{object_id} 删除后仍存在。")
+                    else:
+                        removed.append(object_id)
+            except Exception as exc:
+                residuals.append(f"{object_id} 无法安全清理：{exc}")
+
+        try:
+            current_run = self._read_run()
+            if current_run is None:
+                absent.append("run_value")
+            elif current_run != plan.run_command:
+                residuals.append("run_value 已被修改，已保留。")
+            else:
+                self._remove_created_run()
+                if self._read_run() is None:
+                    removed.append("run_value")
+                else:
+                    residuals.append("run_value 删除后仍存在。")
+        except Exception as exc:
+            residuals.append(f"run_value 无法安全清理：{exc}")
+
+        remove_shortcut("start_menu_shortcut", plan.start_menu_shortcut)
+        remove_shortcut("desktop_shortcut", plan.desktop_shortcut)
+
+        try:
+            current_registration = self._read_uninstall_raw()
+            if current_registration is None:
+                absent.append("uninstall_key")
+            elif not _registration_owned_for_uninstall(
+                current_registration,
+                plan.registration,
+            ):
+                residuals.append("uninstall_key 已被修改或包含未知字段，已保留。")
+            else:
+                self._remove_created_uninstall()
+                if self._read_uninstall_raw() is None:
+                    removed.append("uninstall_key")
+                else:
+                    residuals.append("uninstall_key 删除后仍存在。")
+        except Exception as exc:
+            residuals.append(f"uninstall_key 无法安全清理：{exc}")
+
+        return SystemIntegrationRemovalResult(
+            removed=tuple(removed),
+            absent=tuple(absent),
+            residuals=tuple(residuals),
+        )
 
     def snapshot(self, plan: IntegrationPlan) -> UpgradeIntegrationSnapshot:
         """Validate a committed install and capture values without changing them."""
@@ -860,6 +942,24 @@ def _registration_with_version_and_size(
         no_modify=source.no_modify,
         no_repair=source.no_repair,
     )
+
+
+def _registration_owned_for_uninstall(
+    current: Mapping[str, str | int],
+    expected: InstalledAppRegistration,
+) -> bool:
+    """Accept the exact frozen field set while allowing its positive size value."""
+    expected_values = expected.registry_values()
+    if set(current) != set(expected_values):
+        return False
+    for name, value in expected_values.items():
+        if name == "EstimatedSize":
+            actual = current.get(name)
+            if isinstance(actual, bool) or not isinstance(actual, int) or actual < 1:
+                return False
+        elif current.get(name) != value:
+            return False
+    return True
 
 
 def _absolute(path: Path, label: str) -> Path:

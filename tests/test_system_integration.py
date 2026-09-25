@@ -171,6 +171,45 @@ class SystemIntegrationTests(unittest.TestCase):
             self.assertIn(paths.start_menu_shortcut, shortcuts.values)
             self.assertNotIn(paths.desktop_shortcut, shortcuts.values)
 
+    def test_uninstall_removes_only_objects_that_still_match(self) -> None:
+        with temporary_directory() as temporary:
+            paths = self._paths(Path(temporary))
+            shortcuts = _Shortcuts()
+            registry = _Registry()
+            backend = WindowsFirstInstallIntegration(shortcuts, registry_module=registry)
+            plan = IntegrationPlan.create(
+                paths,
+                version="0.8.0",
+                estimated_size_kib=100,
+                desktop_enabled=True,
+            )
+            backend.write(plan)
+            registry.SetValueEx(
+                _Key(registry, RUN_KEY),
+                RUN_VALUE_NAME,
+                0,
+                registry.REG_SZ,
+                "user-modified-command",
+            )
+            shortcuts.values[paths.desktop_shortcut] = ShortcutSpec(
+                path=paths.desktop_shortcut,
+                target=paths.main_executable,
+                arguments="",
+                working_directory=paths.app_directory,
+                description="用户修改过的说明",
+                icon_location=f"{paths.main_executable},0",
+            )
+
+            result = backend.remove_owned(plan)
+
+            self.assertFalse(result.complete)
+            self.assertIn("start_menu_shortcut", result.removed)
+            self.assertIn("uninstall_key", result.removed)
+            self.assertIn(RUN_VALUE_NAME, registry.keys[RUN_KEY])
+            self.assertIn(paths.desktop_shortcut, shortcuts.values)
+            self.assertTrue(any("run_value" in item for item in result.residuals))
+            self.assertTrue(any("desktop_shortcut" in item for item in result.residuals))
+
     def test_foreign_existing_object_blocks_before_write(self) -> None:
         with temporary_directory() as temporary:
             paths = self._paths(Path(temporary))

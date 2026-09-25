@@ -12,6 +12,7 @@ analysis = Analysis(
         (str(project_root / "assets" / "LanDrop.ico"), "assets"),
         (str(project_root / "assets" / "LanDrop-icon-preview.png"), "assets"),
         (str(project_root / "ui"), "ui"),
+        (str(project_root / "scripts" / "shortcut-bridge.ps1"), "scripts"),
     ],
     hiddenimports=[],
     hookspath=[],

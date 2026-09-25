@@ -4,7 +4,7 @@
 
 > 文档状态：修订稿 v4（第八阶段方案冻结版，持续记录阶段实施结果）
 > 适用对象：具备基础 Python 使用经验、暂不了解计算机通信原理的个人开发者
-> 当前进度：第六阶段已以 `0.6.0` 收官；第七阶段开发验收已通过并冻结为第八阶段基线，94 项自动化回归、桌面/移动界面人工回归和本机 PyInstaller `--onedir` 构建回归均已完成。第七阶段正式干净 Windows 11 验收因第二台电脑暂不可用而延期；第八阶段“安装器、卸载器与分发”核心方案已冻结，进入实施前准备。最终发布验收仍必须补齐无 Python/无源码干净环境下的安装、升级、卸载与系统状态恢复。
+> 当前进度：第六阶段已以 `0.6.0` 收官；第七阶段开发验收已通过并冻结为第八阶段基线。第八阶段 Phase 8A～8D 的安装状态、首次安装、事务升级/回滚和真实 Uninstall 开发实现已经完成，169 项自动化回归及主程序 onedir、Setup/Uninstall onefile 构建自检通过。下一门槛是当前机器真实安装/升级/卸载生命周期审计；第二台无 Python/无源码干净 Windows 11 的完整发布验收仍延期保留，完成前不得宣称正式发布验收结束。
 > 暂定平台：Windows 11 服务机 + Android/Windows 浏览器客户机
 
 ## 1. 项目目标
@@ -964,9 +964,10 @@ Setup、临时 Uninstall、LanDrop 正常启动和 `pending_cleanup` 共用一�
 | 2026-09-20 | 临时卸载使用独立 nonce/expected hash 绑定请求，所有删除统一拒绝 reparse 跟随 | 防止陈旧请求、路径错配和异常交接；未知链接对象宁可报告残留，也不冒险递归删除外部数据 |
 | 2026-09-20 | `--self-check` 作为无副作用维护模式绕过生命周期锁；普通启动发现未完成 transaction 时必须拒绝 | Setup 可以在持续持锁时验证新 app，不重新打开 TOCTOU 窗口；Setup 崩溃后也不会让未提交的新 app 被用户直接运行 |
 | 2026-09-24 | 临时卸载取得生命周期锁后重读权威 `install.json` 并与 request 复核 | 防止卸载确认页停留期间完成升级后，旧版本 request 删除已经变化的新安装；不要求原卸载 UI 长时间占锁 |
+| 2026-09-25 | Phase 8A～8D 开发实现完成，临时 Uninstall 使用绑定 request、精确对象移除和统一 reparse 边界 | 169 项自动化与 Setup/Uninstall onefile 构建自检已通过；真实当前用户安装根生命周期与干净机发布验收仍保持为独立门槛 |
 
 ## 10. 下一步
 
-第八阶段核心方案已冻结。下一步按 [第八阶段详细计划](PHASE8_TECHNICAL_SPIKE_TODO.md) 顺序实施：先落地安装布局、payload 清单、`install.json`/`install-history.jsonl` 和单文件 Setup；再建立 HKCU 卸载登记、开始菜单/可选桌面快捷方式、`LanDrop.Desktop` 通知身份及可由任务管理器禁用的登录启动；随后实现运行中阻断、托盘活动传输退出确认、staging/rollback 升级、`pending_cleanup` 和临时卸载器完整迁出。
+第八阶段 Phase 8A～8D 开发实现已经完成：安装布局、payload 清单、权威安装状态、当前用户系统集成、事务升级/回滚、`pending_cleanup` 和临时卸载器完整迁出均已通过自动化，当前完整回归为 169 项；主程序 onedir、Uninstall onefile 与 Setup onefile 已在冻结构建基线上重新生成并通过自检。下一步先做 Phase 8A～8D 整体生命周期审计，再在当前机器执行真实 `Setup A → 运行 A → Setup B → 运行 B → Windows 卸载`，核对固定程序根、HKCU Run/Uninstall、快捷方式、TEMP 自清理、数据选择和用户收发文件。
 
 本机生命周期回归通过后，再在无源码、无 venv、无独立 Python 的干净 Windows 11 上完成最终发布验收。该环境必须从单个 `LanDrop-Setup.exe` 开始验证 WebView2 前置检查、安装、Private 真实传输、Windows 原生防火墙行为、自启动但服务默认关闭、Public 拒绝、升级、卸载和系统状态恢复。第七阶段延期的干净环境验收与第八阶段发布验收合并执行；完成前不得宣称正式发布验收结束。

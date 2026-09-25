@@ -1,6 +1,8 @@
 # 第八阶段详细计划：安装器、卸载器与分发
 
-状态：**编码前安装生命周期契约已冻结完成，待实施（2026-09-24）**。
+状态：**Phase 8A～8D 开发实现与自动化回归完成；待本机真实安装/升级/卸载生命周期审计与干净 Windows 11 最终发布验收（2026-09-25）**。
+
+实施进度（2026-09-25）：安装契约、生命周期锁、权威状态、首次安装、事务升级/回滚、`pending_cleanup`、临时 Uninstall 迁出、绑定 request、精确系统对象移除及用户数据白名单清理均已落地。完整自动化回归为 169 项且全部通过；Python 3.12 x64 + PyInstaller 6.22.3 已重复生成主程序 `--onedir`、Uninstall `--onefile --windowed` 和 Setup `--onefile --windowed`，三者自检通过。尚未在当前用户正式安装根执行真实安装/升级/卸载；Windows 设置/控制面板入口、真实 TEMP 自清理与系统状态恢复仍属于下一道本机门槛，第二台干净 Windows 11 验收继续作为最终发布门槛。
 
 前置条件：第七阶段开发验收已通过并冻结为第八阶段基线。当前已有 Python 3.12 x64 + PyInstaller 6.22.3 `--onedir` 主程序构建、统一资源定位、单实例、WebView2 Runtime 检查、滚动日志、托盘/Toast、Private/Public 网络边界及 94 项自动化回归证据。第七阶段正式无 Python/无源码干净 Windows 11 验收因测试机暂不可用而延期，必须在第八阶段最终发布验收中一并补齐。
 
@@ -607,6 +609,8 @@ request 至少包含：创建时间、过期时间、原卸载器 PID、固定�
 - 用户后来选择的其他接收目录；
 - 这些目录中的任何正常用户文件。
 
+P8-S19～S22 实现结果（2026-09-25）：正式 `Uninstall.exe` 已替换第八阶段早期安全占位入口。安装目录进程生成规范化 request 和独立命令行 nonce/expected hash，复制自身到严格命名的 `%TEMP%\LanDrop\uninstall-*`；临时副本等待原 PyInstaller 父/子进程完全退出，取得生命周期锁后复核当前 `install.json`、版本/build、事务状态和正式进程，再按四对象清单移除仍精确匹配的系统入口。程序根删除和三类用户数据清理均先完成 canonical/reparse 预检；配置和可信客户机使用精确文件白名单，日志使用精确名称白名单，未知数据保留，所有收发目录始终不参与清理。TEMP 自清理必须成功调度后才允许结果页报告完整成功。
+
 ## 九、自动化与本机构建回归
 
 ### P8-T01：安装契约单元测试
@@ -873,29 +877,29 @@ LanDrop-Setup.exe
 
 第八阶段开发验收至少需要：
 
-- [ ] 主程序正式保持 `--onedir`，Setup/Uninstall 均可重复生成 onefile；
-- [ ] 当前用户固定安装路径和稳定 `app\LanDrop.exe` 入口通过；
-- [ ] `install.json` 权威状态与 `install-history.jsonl` 历史落地；
-- [ ] 独立 `transaction.json`、最终提交顺序和中断恢复通过；
-- [ ] Setup/Uninstall/LanDrop 启动/pending cleanup 共用安装生命周期锁，TOCTOU 回归通过；
-- [ ] Setup 持锁时 `--self-check` 无副作用通过，四个事务阶段强杀后的普通 LanDrop 启动均被阻止；
-- [ ] payload manifest/SHA-256 验证通过；
+- [x] 主程序正式保持 `--onedir`，Setup/Uninstall 均可重复生成 onefile；
+- [x] 当前用户固定安装路径和稳定 `app\LanDrop.exe` 入口通过自动化；正式根实机验证待本机生命周期回归；
+- [x] `install.json` 权威状态与 `install-history.jsonl` 历史落地；
+- [x] 独立 `transaction.json`、最终提交顺序和中断恢复通过；
+- [x] Setup/Uninstall/LanDrop 启动/pending cleanup 共用安装生命周期锁，TOCTOU 回归通过；
+- [x] Setup 持锁时 `--self-check` 无副作用通过，四个事务阶段强杀后的普通 LanDrop 启动均被阻止；
+- [x] payload manifest/SHA-256 验证通过；
 - [ ] 开始菜单、默认不勾选的可选桌面快捷方式、AUMID、HKCU Run 正常；
 - [ ] 任务管理器/Windows 启动应用页可禁用自启动，且 LanDrop 不自动恢复；
 - [ ] 升级保留 Run/StartupApproved 当前状态，未获明确选择时不恢复用户删除的 Run；
 - [ ] Windows 设置与控制面板均可见并可调用卸载；
 - [ ] Setup/LanDrop/Uninstall 均未主动写防火墙或网络配置；
-- [ ] WebView2 不捆绑、不联网安装，缺失时安全阻断；
-- [ ] 运行中的 LanDrop 会阻止升级/卸载，不自动 Kill；
+- [x] WebView2 不捆绑、不联网安装，缺失时安全阻断；
+- [x] 运行中的 LanDrop 会阻止升级/卸载，不自动 Kill；
 - [ ] 活动传输退出需要用户明确确认；
-- [ ] A→B 事务升级、失败回滚和 `pending_cleanup` 通过；
-- [ ] 升级成功后旧 payload 不长期累积；
-- [ ] Uninstall 能迁出安装目录后删除完整程序根；
-- [ ] 临时卸载 request 绑定、时效、自身哈希、锁后权威 `install.json` 复核与统一 reparse 安全边界通过；
-- [ ] 系统集成对象清单明确，卸载器只删除自身实际创建且匹配的对象；
-- [ ] 用户数据删除/保留符合选择；
-- [ ] Shared/Received 和自定义用户文件目录永不删除；
-- [ ] 既有 94 项及 Phase 8 新增自动化回归全部通过；
+- [x] A→B 事务升级、失败回滚和 `pending_cleanup` 通过自动化；
+- [x] 升级成功后旧 payload 不长期累积；
+- [x] Uninstall 能在隔离测试根迁出安装目录后删除完整程序根；正式根实机验证待本机生命周期回归；
+- [x] 临时卸载 request 绑定、时效、自身哈希、锁后权威 `install.json` 复核与统一 reparse 安全边界通过；
+- [x] 系统集成对象清单明确，卸载器只删除自身实际创建且匹配的对象；
+- [x] 用户数据删除/保留符合选择；
+- [x] Shared/Received 和自定义用户文件目录永不删除；
+- [x] 既有回归及 Phase 8 新增自动化合计 169 项全部通过；
 - [ ] 本机安装/升级/卸载完整生命周期通过。
 
 **最终发布验收**还必须额外满足：

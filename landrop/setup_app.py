@@ -13,7 +13,7 @@ import threading
 from typing import Any
 
 from .app_logging import install_exception_hooks
-from .install_contract import InstallPaths
+from .install_contract import InstallPaths, install_paths_for_current_windows_user
 from .installer import FirstInstallOptions, FirstInstallOutcome, FirstInstallService
 from .payload_manifest import PayloadManifest, read_payload_manifest, verify_payload
 from .platform_checks import webview2_runtime_version
@@ -57,7 +57,7 @@ class SetupRuntime:
         paths: InstallPaths | None = None,
     ) -> None:
         self.bundle = bundle or SetupBundle()
-        self.paths = paths or _install_paths_with_windows_desktop()
+        self.paths = paths or install_paths_for_current_windows_user()
         self.manifest = self.bundle.validate()
 
     def _integration(self) -> WindowsFirstInstallIntegration:
@@ -252,7 +252,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0 if manifest.files else 3
 
     try:
-        paths = _install_paths_with_windows_desktop()
+        paths = install_paths_for_current_windows_user()
         logger = _configure_setup_logging(paths.data_root)
     except Exception as exc:
         _show_native_error(f"LanDrop Setup 无法初始化诊断日志：{exc}")
@@ -321,33 +321,6 @@ def _configure_setup_logging(data_directory: Path) -> logging.Logger:
     logger.addHandler(handler)
     logger.info("LanDrop Setup logging initialized")
     return logger
-
-
-def _install_paths_with_windows_desktop() -> InstallPaths:
-    paths = InstallPaths.from_environment()
-    if os.name != "nt":
-        return paths
-    try:
-        import winreg
-
-        shell_folders = (
-            r"Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders"
-        )
-        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, shell_folders) as key:
-            raw, value_type = winreg.QueryValueEx(key, "Desktop")
-        if value_type not in {winreg.REG_SZ, winreg.REG_EXPAND_SZ} or not isinstance(raw, str):
-            return paths
-        desktop = Path(os.path.expandvars(raw))
-        if desktop.is_absolute():
-            return InstallPaths(
-                paths.local_app_data,
-                paths.roaming_app_data,
-                desktop,
-                paths.temp_directory,
-            )
-    except OSError:
-        pass
-    return paths
 
 
 def _show_native_error(message: str) -> None:

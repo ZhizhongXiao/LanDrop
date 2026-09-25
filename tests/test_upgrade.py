@@ -472,6 +472,55 @@ class UpgradeTests(unittest.TestCase):
             self.assertTrue(recovered.committed)
             self.assertFalse(paths.transaction_state_path.exists())
             self.assertFalse(rollback.exists())
+
+    def test_empty_staging_cleanup_failure_keeps_b_and_recovers_on_setup_restart(self) -> None:
+        with temporary_directory() as temporary:
+            root = Path(temporary)
+            blocked_once = {"value": True}
+
+            def fail_empty_staging_once(target: Path, paths: InstallPaths) -> None:
+                if (
+                    blocked_once["value"]
+                    and target.name.startswith(".staging-")
+                    and target.is_dir()
+                    and not any(target.iterdir())
+                ):
+                    blocked_once["value"] = False
+                    raise PermissionError("empty staging locked")
+                _remove_transaction_tree(target, paths)
+
+            service, paths, store, integration = self._service(
+                root,
+                remove_tree=fail_empty_staging_once,
+            )
+            first = service.upgrade()
+
+            self.assertTrue(first.committed)
+            self.assertFalse(first.verified)
+            self.assertEqual(store.read_install(required=True).version, "2.0.0")
+            self.assertTrue(paths.transaction_state_path.exists())
+            self.assertEqual(paths.main_executable.read_bytes(), b"app-b")
+
+            restarted = UpgradeService(
+                paths=paths,
+                payload_root=service.payload_root,
+                manifest=service.manifest,
+                integration=integration,
+                self_check=lambda _path: True,
+                state_store=store,
+                lifecycle_lock=_FakeLock(),  # type: ignore[arg-type]
+                executable_running=lambda _path: False,
+                remove_tree=fail_empty_staging_once,
+            ).upgrade()
+
+            self.assertTrue(restarted.verified)
+            self.assertTrue(restarted.committed)
+            self.assertEqual(store.read_install(required=True).version, "2.0.0")
+            self.assertFalse(paths.transaction_state_path.exists())
+            self.assertFalse(
+                any(child.name.startswith(".staging-") for child in paths.install_root.iterdir())
+            )
+            self.assertEqual(paths.main_executable.read_bytes(), b"app-b")
             self.assertEqual(paths.main_executable.read_bytes(), b"app-b")
             self.assertEqual(paths.uninstall_executable.read_bytes(), b"uninstall-b")
 
