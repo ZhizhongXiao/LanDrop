@@ -18,6 +18,7 @@ from .install_contract import (
     PUBLISHER,
     RUN_KEY,
     RUN_VALUE_NAME,
+    STARTUP_APPROVED_RUN_KEY,
     UNINSTALL_KEY,
     InstallPaths,
     is_reparse_object,
@@ -470,7 +471,7 @@ class PowerShellShortcutBackend:
 
 
 class WindowsFirstInstallIntegration:
-    """Write and read back exactly the four frozen current-user objects."""
+    """Manage created objects plus exact cleanup-only Windows-derived state."""
 
     def __init__(
         self,
@@ -573,6 +574,21 @@ class WindowsFirstInstallIntegration:
                     residuals.append("run_value 删除后仍存在。")
         except Exception as exc:
             residuals.append(f"run_value 无法安全清理：{exc}")
+
+        try:
+            startup_approved = self._read_startup_approved_run()
+            if startup_approved is None:
+                absent.append("startup_approved_run_value")
+            else:
+                self._remove_startup_approved_run()
+                if self._read_startup_approved_run() is None:
+                    removed.append("startup_approved_run_value")
+                else:
+                    residuals.append("startup_approved_run_value 删除后仍存在。")
+        except Exception as exc:
+            residuals.append(
+                f"startup_approved_run_value 无法安全清理：{exc}"
+            )
 
         remove_shortcut("start_menu_shortcut", plan.start_menu_shortcut)
         remove_shortcut("desktop_shortcut", plan.desktop_shortcut)
@@ -733,6 +749,37 @@ class WindowsFirstInstallIntegration:
             with registry.OpenKey(
                 registry.HKEY_CURRENT_USER,
                 RUN_KEY,
+                0,
+                registry.KEY_SET_VALUE,
+            ) as key:
+                registry.DeleteValue(key, RUN_VALUE_NAME)
+        except FileNotFoundError:
+            return
+
+    def _read_startup_approved_run(self) -> bytes | None:
+        registry = self._registry
+        try:
+            with registry.OpenKey(
+                registry.HKEY_CURRENT_USER,
+                STARTUP_APPROVED_RUN_KEY,
+                0,
+                registry.KEY_READ,
+            ) as key:
+                value, value_type = registry.QueryValueEx(key, RUN_VALUE_NAME)
+        except FileNotFoundError:
+            return None
+        if value_type != registry.REG_BINARY or not isinstance(value, bytes):
+            raise SystemIntegrationError(
+                "HKCU StartupApproved Run LanDrop 值类型不可解释。"
+            )
+        return value
+
+    def _remove_startup_approved_run(self) -> None:
+        registry = self._registry
+        try:
+            with registry.OpenKey(
+                registry.HKEY_CURRENT_USER,
+                STARTUP_APPROVED_RUN_KEY,
                 0,
                 registry.KEY_SET_VALUE,
             ) as key:

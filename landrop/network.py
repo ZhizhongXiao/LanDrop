@@ -39,7 +39,7 @@ $items = Get-NetConnectionProfile -ErrorAction Stop |
 
 _BENCHMARK_NETWORK = ipaddress.ip_network("198.18.0.0/15")
 _ERROR_INSUFFICIENT_BUFFER = 122
-RUNTIME_CATEGORY_TIMEOUT_SECONDS = 2.0
+RUNTIME_CATEGORY_TIMEOUT_SECONDS = 4.0
 
 _EXCLUDED_WORDS = (
     "meta",
@@ -234,17 +234,77 @@ def read_network_category(
     timeout: float = RUNTIME_CATEGORY_TIMEOUT_SECONDS,
 ) -> str:
     """Read one interface's current category; failure remains fail-closed."""
-    profiles, error = _read_connection_profiles_result(timeout=timeout)
+    profile, error = _read_connection_profile_result(
+        interface_index,
+        timeout=timeout,
+    )
     if error:
-        if alias.casefold() in {"wlan", "wi-fi", "wifi"} or "wireless" in alias.casefold():
-            fallback = _read_wifi_registry_profile()
-            if fallback is not None:
-                return str(fallback.get("category") or "Unknown")
         raise NetworkDiscoveryError(error)
-    profile = profiles.get(interface_index)
     if profile is None:
         return "Unknown"
     return str(profile.get("category") or "Unknown")
+
+
+def _read_connection_profile_result(
+    interface_index: int,
+    *,
+    timeout: float,
+) -> tuple[dict[str, object] | None, str]:
+    """Read only the frozen interface's profile for the runtime monitor."""
+    index = int(interface_index)
+    script = rf"""
+[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+$item = Get-NetConnectionProfile -InterfaceIndex {index} -ErrorAction Stop
+[PSCustomObject]@{{
+    alias = [string]$item.InterfaceAlias
+    interface_index = [int]$item.InterfaceIndex
+    category = [string]$item.NetworkCategory
+    connectivity = [string]$item.IPv4Connectivity
+    name = [string]$item.Name
+}} | ConvertTo-Json -Compress
+"""
+    creation_flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    try:
+        completed = subprocess.run(
+            [
+                POWERSHELL,
+                "-NoLogo",
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                script,
+            ],
+            check=False,
+            capture_output=True,
+            encoding="utf-8-sig",
+            errors="replace",
+            timeout=timeout,
+            creationflags=creation_flags,
+        )
+    except subprocess.TimeoutExpired:
+        return None, "Windows 网络类别查询超时。"
+    except (OSError, subprocess.SubprocessError) as exc:
+        return None, f"Windows 网络类别查询失败：{exc}"
+
+    if completed.returncode != 0:
+        detail = (completed.stderr or "").strip()
+        return None, detail or "Windows 网络类别查询未成功。"
+
+    output = completed.stdout.strip()
+    try:
+        record = json.loads(output or "null")
+    except json.JSONDecodeError:
+        return None, "Windows 网络类别查询返回了无法解析的数据。"
+    if not isinstance(record, dict):
+        return None, ""
+    try:
+        if int(record["interface_index"]) != index:
+            return None, ""
+    except (KeyError, TypeError, ValueError):
+        return None, ""
+    return record, ""
 
 
 def _read_wifi_registry_profile() -> dict[str, object] | None:

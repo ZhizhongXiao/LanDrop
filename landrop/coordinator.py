@@ -18,6 +18,7 @@ AUTOMATIC_STOP_REASONS = frozenset(
         "grace_timeout",
         "system_resume",
         "network_changed",
+        "network_category_unavailable",
     }
 )
 

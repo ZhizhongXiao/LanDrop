@@ -5,7 +5,14 @@ from pathlib import Path
 import subprocess
 import unittest
 
-from landrop.install_contract import APP_USER_MODEL_ID, InstallPaths, RUN_KEY, RUN_VALUE_NAME, UNINSTALL_KEY
+from landrop.install_contract import (
+    APP_USER_MODEL_ID,
+    InstallPaths,
+    RUN_KEY,
+    RUN_VALUE_NAME,
+    STARTUP_APPROVED_RUN_KEY,
+    UNINSTALL_KEY,
+)
 from landrop.system_integration import (
     IntegrationPlan,
     PowerShellShortcutBackend,
@@ -34,6 +41,7 @@ class _Registry:
     KEY_WRITE = 2
     KEY_SET_VALUE = 4
     REG_SZ = 1
+    REG_BINARY = 3
     REG_DWORD = 4
 
     def __init__(self) -> None:
@@ -123,7 +131,7 @@ class SystemIntegrationTests(unittest.TestCase):
             self.assertEqual(plan.registration.no_repair, 1)
             self.assertFalse(plan.desktop_enabled)
 
-    def test_real_integration_coordinator_writes_verifies_and_rolls_back_four_objects(self) -> None:
+    def test_real_integration_coordinator_does_not_create_cleanup_only_state(self) -> None:
         with temporary_directory() as temporary:
             paths = self._paths(Path(temporary))
             shortcuts = _Shortcuts()
@@ -146,11 +154,13 @@ class SystemIntegrationTests(unittest.TestCase):
                 {name: value for name, (value, _kind) in registry.keys[UNINSTALL_KEY].items()},
                 plan.registration.registry_values(),
             )
+            self.assertNotIn(STARTUP_APPROVED_RUN_KEY, registry.keys)
 
             backend.rollback(plan)
             self.assertFalse(shortcuts.values)
             self.assertNotIn(RUN_VALUE_NAME, registry.keys[RUN_KEY])
             self.assertNotIn(UNINSTALL_KEY, registry.keys)
+            self.assertNotIn(STARTUP_APPROVED_RUN_KEY, registry.keys)
 
     def test_optional_desktop_shortcut_is_verified_absent(self) -> None:
         with temporary_directory() as temporary:
@@ -209,6 +219,61 @@ class SystemIntegrationTests(unittest.TestCase):
             self.assertIn(paths.desktop_shortcut, shortcuts.values)
             self.assertTrue(any("run_value" in item for item in result.residuals))
             self.assertTrue(any("desktop_shortcut" in item for item in result.residuals))
+            self.assertIn("startup_approved_run_value", result.absent)
+
+    def test_uninstall_removes_only_exact_startup_approved_binary_value(self) -> None:
+        with temporary_directory() as temporary:
+            paths = self._paths(Path(temporary))
+            shortcuts = _Shortcuts()
+            registry = _Registry()
+            backend = WindowsFirstInstallIntegration(shortcuts, registry_module=registry)
+            plan = IntegrationPlan.create(
+                paths,
+                version="0.8.0",
+                estimated_size_kib=100,
+                desktop_enabled=False,
+            )
+            backend.write(plan)
+            startup_values = registry.keys.setdefault(STARTUP_APPROVED_RUN_KEY, {})
+            startup_values[RUN_VALUE_NAME] = (b"\x03\x00\x00\x00", registry.REG_BINARY)
+            startup_values["OtherProduct"] = (b"\x02\x00\x00\x00", registry.REG_BINARY)
+
+            result = backend.remove_owned(plan)
+
+            self.assertTrue(result.complete)
+            self.assertIn("startup_approved_run_value", result.removed)
+            self.assertNotIn(RUN_VALUE_NAME, registry.keys[STARTUP_APPROVED_RUN_KEY])
+            self.assertEqual(
+                registry.keys[STARTUP_APPROVED_RUN_KEY]["OtherProduct"],
+                (b"\x02\x00\x00\x00", registry.REG_BINARY),
+            )
+
+    def test_uninstall_preserves_unexpected_startup_approved_type_as_residual(self) -> None:
+        with temporary_directory() as temporary:
+            paths = self._paths(Path(temporary))
+            shortcuts = _Shortcuts()
+            registry = _Registry()
+            backend = WindowsFirstInstallIntegration(shortcuts, registry_module=registry)
+            plan = IntegrationPlan.create(
+                paths,
+                version="0.8.0",
+                estimated_size_kib=100,
+                desktop_enabled=False,
+            )
+            backend.write(plan)
+            startup_values = registry.keys.setdefault(STARTUP_APPROVED_RUN_KEY, {})
+            startup_values[RUN_VALUE_NAME] = ("unexpected", registry.REG_SZ)
+
+            result = backend.remove_owned(plan)
+
+            self.assertFalse(result.complete)
+            self.assertEqual(
+                registry.keys[STARTUP_APPROVED_RUN_KEY][RUN_VALUE_NAME],
+                ("unexpected", registry.REG_SZ),
+            )
+            self.assertTrue(
+                any("startup_approved_run_value" in item for item in result.residuals)
+            )
 
     def test_foreign_existing_object_blocks_before_write(self) -> None:
         with temporary_directory() as temporary:
@@ -241,9 +306,15 @@ class SystemIntegrationTests(unittest.TestCase):
                 desktop_enabled=True,
             )
             backend.write(plan_a)
+            registry.keys.setdefault(STARTUP_APPROVED_RUN_KEY, {})[
+                RUN_VALUE_NAME
+            ] = (b"\x03\x00\x00\x00", registry.REG_BINARY)
             snapshot = backend.snapshot(plan_a)
             shortcuts_before = dict(shortcuts.values)
             run_before = registry.keys[RUN_KEY][RUN_VALUE_NAME]
+            startup_approved_before = dict(
+                registry.keys[STARTUP_APPROVED_RUN_KEY]
+            )
 
             backend.update_registration(
                 snapshot,
@@ -259,12 +330,20 @@ class SystemIntegrationTests(unittest.TestCase):
             self.assertEqual(shortcuts.values, shortcuts_before)
             self.assertEqual(registry.keys[RUN_KEY][RUN_VALUE_NAME], run_before)
             self.assertEqual(
+                registry.keys[STARTUP_APPROVED_RUN_KEY],
+                startup_approved_before,
+            )
+            self.assertEqual(
                 registry.keys[UNINSTALL_KEY]["DisplayVersion"][0],
                 "2.0.0",
             )
             self.assertEqual(registry.keys[UNINSTALL_KEY]["EstimatedSize"][0], 250)
 
             backend.restore_upgrade(snapshot)
+            self.assertEqual(
+                registry.keys[STARTUP_APPROVED_RUN_KEY],
+                startup_approved_before,
+            )
             self.assertEqual(
                 registry.keys[UNINSTALL_KEY]["DisplayVersion"][0],
                 "1.0.0",

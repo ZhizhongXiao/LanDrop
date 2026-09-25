@@ -14,6 +14,7 @@ import secrets
 import shutil
 import stat
 import subprocess
+import sys
 import time
 from typing import Callable, Mapping, Protocol
 
@@ -129,6 +130,7 @@ class UninstallHandoff:
 class UninstallOutcome:
     complete: bool
     message: str
+    finalization_pending: bool = False
     removed_integration: tuple[str, ...] = ()
     absent_integration: tuple[str, ...] = ()
     residuals: tuple[str, ...] = ()
@@ -138,6 +140,7 @@ class UninstallOutcome:
         return {
             "complete": self.complete,
             "message": self.message,
+            "finalization_pending": self.finalization_pending,
             "removed_integration": list(self.removed_integration),
             "absent_integration": list(self.absent_integration),
             "residuals": list(self.residuals),
@@ -589,13 +592,43 @@ def launch_temporary_uninstaller(handoff: UninstallHandoff) -> None:
 def schedule_temp_self_cleanup(temporary_directory: Path, paths: InstallPaths) -> None:
     target = validate_uninstall_temp_directory(temporary_directory, paths)
     _preflight_tree(target)
+    cleanup_cwd = paths.temp_directory.resolve(strict=True)
+    if _is_same_or_child(cleanup_cwd, target):
+        raise UninstallError("临时卸载清理器工作目录不得位于待删除目录内。")
     powershell = Path(os.environ.get("SYSTEMROOT", r"C:\Windows")) / (
         r"System32\WindowsPowerShell\v1.0\powershell.exe"
     )
     escaped = str(target).replace("'", "''")
+    process_ids = [os.getpid()]
+    if getattr(sys, "frozen", False):
+        parent_pid = os.getppid()
+        if parent_pid > 0 and parent_pid not in process_ids:
+            process_ids.append(parent_pid)
+    process_id_list = ", ".join(str(process_id) for process_id in process_ids)
     script = (
-        f"Wait-Process -Id {os.getpid()} -ErrorAction SilentlyContinue; "
-        f"Remove-Item -LiteralPath '{escaped}' -Recurse -Force -ErrorAction SilentlyContinue"
+        f"$processIds = @({process_id_list}); "
+        "foreach ($processId in $processIds) { "
+        "Wait-Process -Id $processId -ErrorAction SilentlyContinue }; "
+        "$deleted = $false; "
+        "for ($attempt = 0; $attempt -lt 30; $attempt++) { "
+        "try { "
+        f"if (Test-Path -LiteralPath '{escaped}') {{ "
+        f"Remove-Item -LiteralPath '{escaped}' -Recurse -Force -ErrorAction Stop "
+        "} "
+        "} catch { }; "
+        f"if (-not (Test-Path -LiteralPath '{escaped}')) {{ "
+        "$deleted = $true; break }; "
+        "$delay = if ($attempt -lt 8) { 250 } else { 500 }; "
+        "Start-Sleep -Milliseconds $delay "
+        "}; "
+        "if ($deleted) { exit 0 }; "
+        "try { "
+        "Add-Type -AssemblyName PresentationFramework -ErrorAction Stop; "
+        "[System.Windows.MessageBox]::Show("
+        "'LanDrop 临时卸载文件未能自动清理。请稍后删除对应的 uninstall-* 临时目录。', "
+        "'LanDrop Uninstall') | Out-Null "
+        "} catch { }; "
+        "exit 1"
     )
     encoded = __import__("base64").b64encode(script.encode("utf-16le")).decode("ascii")
     subprocess.Popen(
@@ -609,6 +642,7 @@ def schedule_temp_self_cleanup(temporary_directory: Path, paths: InstallPaths) -
             "-EncodedCommand",
             encoded,
         ],
+        cwd=str(cleanup_cwd),
         close_fds=True,
         creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
     )
@@ -792,3 +826,12 @@ def _absolute(path: Path) -> Path:
 
 def _same_path(left: Path, right: Path) -> bool:
     return os.path.normcase(os.path.abspath(left)) == os.path.normcase(os.path.abspath(right))
+
+
+def _is_same_or_child(candidate: Path, root: Path) -> bool:
+    candidate_text = os.path.normcase(os.path.abspath(candidate))
+    root_text = os.path.normcase(os.path.abspath(root))
+    try:
+        return os.path.commonpath((candidate_text, root_text)) == root_text
+    except ValueError:
+        return False

@@ -2,7 +2,6 @@
 
 const result = document.getElementById("previewResult");
 const desktop = document.getElementById("desktopShortcut");
-const desktopSummary = document.getElementById("desktopSummary");
 let pollTimer = null;
 let setupDisposition = "first_install";
 let setupBlockedMessage = "";
@@ -80,10 +79,6 @@ const wizardOptions = {
 
 createWizard(wizardOptions);
 
-desktop.addEventListener("change", () => {
-  desktopSummary.textContent = desktop.checked ? "创建" : "不创建";
-});
-
 window.addEventListener("pywebviewready", async () => {
   const status = await window.pywebview.api.get_status();
   if (!status.ok) {
@@ -97,9 +92,6 @@ window.addEventListener("pywebviewready", async () => {
   const firstInstall = setupDisposition === "first_install";
   desktop.disabled = status.desktop_shortcut_enabled !== true;
   desktop.checked = firstInstall && status.desktop_shortcut_default === true;
-  desktopSummary.textContent = firstInstall
-    ? (desktop.checked ? "创建" : "不创建")
-    : "保持当前状态";
   const actionLabels = {
     first_install: "安装",
     upgrade: "升级",

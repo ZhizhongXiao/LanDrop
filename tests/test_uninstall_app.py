@@ -36,7 +36,7 @@ class UninstallAppTests(unittest.TestCase):
         show.assert_called_once()
         paths.assert_not_called()
 
-    def test_temporary_execution_schedules_self_cleanup_before_reporting_complete(self) -> None:
+    def test_temporary_execution_stays_pending_until_process_exit_cleanup(self) -> None:
         service = _Service(Path("C:/test"))
         api = UninstallApi(
             service,  # type: ignore[arg-type]
@@ -52,7 +52,9 @@ class UninstallAppTests(unittest.TestCase):
                 self.assertLess(time.monotonic(), deadline)
                 time.sleep(0.01)
         outcome = api.get_uninstall_status()["outcome"]
-        self.assertTrue(outcome["complete"])
+        self.assertFalse(outcome["complete"])
+        self.assertTrue(outcome["finalization_pending"])
+        self.assertIn("关闭此窗口后", outcome["message"])
         cleanup.assert_called_once()
         self.assertEqual(service.executions, 1)
 
@@ -76,6 +78,7 @@ class UninstallAppTests(unittest.TestCase):
                 time.sleep(0.01)
         outcome = api.get_uninstall_status()["outcome"]
         self.assertFalse(outcome["complete"])
+        self.assertFalse(outcome["finalization_pending"])
         self.assertTrue(any("自清理" in item for item in outcome["residuals"]))
 
 

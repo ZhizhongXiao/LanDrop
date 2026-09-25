@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
+import base64
 import hashlib
 import json
 import os
@@ -9,7 +10,7 @@ from pathlib import Path
 import unittest
 from unittest import mock
 
-from landrop.install_contract import InstallPaths
+from landrop.install_contract import InstallPaths, uninstall_directory_name
 from landrop.install_state import InstallRecord, InstallationStateStore, TransactionRecord
 from landrop.system_integration import SystemIntegrationRemovalResult
 from landrop.uninstaller import (
@@ -22,6 +23,7 @@ from landrop.uninstaller import (
     preflight_install_root_removal,
     read_bound_request,
     safe_remove_install_root,
+    schedule_temp_self_cleanup,
 )
 from tests.support import temporary_directory
 
@@ -426,6 +428,58 @@ class UninstallerTests(unittest.TestCase):
             self.assertEqual(set(deleted), {"config", "logs", "trusted_clients"})
             self.assertTrue((paths.data_root / "unknown.bin").is_file())
             self.assertTrue((paths.log_directory / "user-note.txt").is_file())
+
+    def test_temp_cleanup_waits_for_onefile_processes_retries_and_uses_safe_cwd(
+        self,
+    ) -> None:
+        with temporary_directory() as temporary:
+            paths = self._paths(Path(temporary))
+            paths.temp_directory.mkdir(parents=True)
+            target = paths.uninstall_temp_root / uninstall_directory_name("a" * 32)
+            target.mkdir(parents=True)
+            (target / "Uninstall.exe").write_bytes(b"temporary")
+
+            with (
+                mock.patch("landrop.uninstaller.os.getpid", return_value=1234),
+                mock.patch("landrop.uninstaller.os.getppid", return_value=5678),
+                mock.patch("landrop.uninstaller.sys.frozen", True, create=True),
+                mock.patch("landrop.uninstaller.subprocess.Popen") as popen,
+            ):
+                schedule_temp_self_cleanup(target, paths)
+
+            command = popen.call_args.args[0]
+            script = base64.b64decode(command[-1]).decode("utf-16le")
+            self.assertEqual(
+                Path(popen.call_args.kwargs["cwd"]),
+                paths.temp_directory.resolve(),
+            )
+            self.assertNotEqual(
+                Path(popen.call_args.kwargs["cwd"]),
+                target.resolve(),
+            )
+            self.assertIn("$processIds = @(1234, 5678)", script)
+            self.assertIn("Wait-Process", script)
+            self.assertIn("$attempt -lt 30", script)
+            self.assertIn("-ErrorAction Stop", script)
+            self.assertIn("Test-Path -LiteralPath", script)
+            self.assertIn("Start-Sleep -Milliseconds $delay", script)
+            self.assertIn("if ($deleted) { exit 0 }", script)
+            self.assertIn("PresentationFramework", script)
+            self.assertIn("exit 1", script)
+
+    def test_temp_cleanup_rejects_target_outside_controlled_temp_root(self) -> None:
+        with temporary_directory() as temporary:
+            root = Path(temporary)
+            paths = self._paths(root)
+            paths.temp_directory.mkdir(parents=True)
+            outside = root / "outside"
+            outside.mkdir()
+
+            with mock.patch("landrop.uninstaller.subprocess.Popen") as popen:
+                with self.assertRaises(Exception):
+                    schedule_temp_self_cleanup(outside, paths)
+
+            popen.assert_not_called()
 
 
 def _same(left: Path, right: Path) -> bool:

@@ -2,7 +2,7 @@
 
 状态：**Phase 8A～8D 开发实现与自动化回归完成；待本机真实安装/升级/卸载生命周期审计与干净 Windows 11 最终发布验收（2026-09-25）**。
 
-实施进度（2026-09-25）：安装契约、生命周期锁、权威状态、首次安装、事务升级/回滚、`pending_cleanup`、临时 Uninstall 迁出、绑定 request、精确系统对象移除及用户数据白名单清理均已落地。完整自动化回归为 169 项且全部通过；Python 3.12 x64 + PyInstaller 6.22.3 已重复生成主程序 `--onedir`、Uninstall `--onefile --windowed` 和 Setup `--onefile --windowed`，三者自检通过。尚未在当前用户正式安装根执行真实安装/升级/卸载；Windows 设置/控制面板入口、真实 TEMP 自清理与系统状态恢复仍属于下一道本机门槛，第二台干净 Windows 11 验收继续作为最终发布门槛。
+实施进度（2026-09-25）：安装契约、生命周期锁、权威状态、首次安装、事务升级/回滚、`pending_cleanup`、临时 Uninstall 迁出、绑定 request、精确系统对象移除及用户数据白名单清理均已落地。首次本机真实 A→B→保留数据卸载已执行到卸载状态核对，暴露 onefile TEMP 自清理时序和 `StartupApproved` 派生状态残留两项阻塞；Phase 8D.1 已完成针对性修复。当前完整自动化回归为 180 项且全部通过；Python 3.12 x64 + PyInstaller 6.22.3 已重新生成主程序 `--onedir`、Uninstall `--onefile --windowed` 和 Setup `--onefile --windowed`，三者自检通过。失败现场已记录并按精确边界清理，当前机器已恢复干净安装基线；完整生命周期下一轮从 A 重新执行，第二台干净 Windows 11 验收继续作为最终发布门槛。
 
 前置条件：第七阶段开发验收已通过并冻结为第八阶段基线。当前已有 Python 3.12 x64 + PyInstaller 6.22.3 `--onedir` 主程序构建、统一资源定位、单实例、WebView2 Runtime 检查、滚动日志、托盘/Toast、Private/Public 网络边界及 94 项自动化回归证据。第七阶段正式无 Python/无源码干净 Windows 11 验收因测试机暂不可用而延期，必须在第八阶段最终发布验收中一并补齐。
 
@@ -350,6 +350,7 @@ HKCU\Software\Microsoft\Windows\CurrentVersion\Run
 - 在任务管理器“启动应用”/Windows 启动应用页可见并可禁用；
 - 用户在 Windows 中禁用后，LanDrop 不得自行重新启用；
 - 升级默认保留当前自启动状态，不写或重置 Windows `StartupApproved`；
+- Setup 首次安装不创建或写入 `StartupApproved`；完整卸载时只清除 `HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run` 中精确名为 `LanDrop`、类型为 `REG_BINARY` 的 Windows 派生状态。该 value 不存在视为正常；类型异常时保留并报告残留；
 - 稳定路径没有变化时不重写 Run。若用户已经禁用或主动删除 Run，Setup 不得偷偷恢复，除非用户在 Setup 中明确重新选择启用；
 - 若用户从应用内提供“打开启动应用设置”，只打开系统页面，不代改系统状态。
 
@@ -381,12 +382,13 @@ HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\LanDrop
 
 ### P8-S10：AUMID / Toast 身份回归
 
-编码前先形成可机读或集中定义的“系统集成对象清单”。当前已经确定且允许 Setup 创建、Uninstall 删除的对象只有：
+编码前先形成可机读或集中定义的“系统集成对象清单”。当前确定的对象为：
 
 - 当前用户开始菜单 `LanDrop.lnk`；
 - 可选的当前用户桌面 `LanDrop.lnk`；
 - `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` 中 LanDrop 自有 value；
-- `HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\LanDrop`。
+- `HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\LanDrop`；
+- `HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run` 中精确名为 `LanDrop` 的 `REG_BINARY` value——仅卸载清理的 Windows 管理派生状态，Setup 不创建，升级不修改。
 
 `SetCurrentProcessExplicitAppUserModelID` 属于运行时调用，不是卸载对象。若最终 Windows-Toasts 实现还需要快捷方式 Property Store 属性、注册表或 COM 激活登记，必须以实际代码创建的精确对象为准追加到清单，并分别定义创建、读回和删除；禁止保留泛化的“通知身份相关安装项”让卸载器猜测。
 
@@ -576,20 +578,23 @@ request 至少包含：创建时间、过期时间、原卸载器 PID、固定�
 
 ```text
 1. 删除 HKCU Run 自启动项
-2. 删除开始菜单快捷方式
-3. 删除桌面快捷方式（如存在）
-4. 按系统集成对象清单删除 LanDrop 实际创建且读回匹配的 Toast/AUMID 附加对象（如最终实现确有这些对象）
-5. 删除 HKCU Uninstall 登记
-6. 删除整个 %LOCALAPPDATA%\Programs\LanDrop
-7. 按用户选择处理 %LOCALAPPDATA%\LanDrop 数据
-8. 若日志保留，持久记录 uninstall_completed；若日志删除，仅由临时卸载日志和完成页表达结果
-9. 启动系统现成的无窗口自清理步骤
-10. 临时 Uninstall 退出后删除 %TEMP%\LanDrop\uninstall-* 目录
+2. 删除 StartupApproved\Run 中精确的 LanDrop REG_BINARY 派生状态；不存在视为正常，类型异常则保留并报告残留
+3. 删除开始菜单快捷方式
+4. 删除桌面快捷方式（如存在）
+5. 按系统集成对象清单删除 LanDrop 实际创建且读回匹配的 Toast/AUMID 附加对象（如最终实现确有这些对象）
+6. 删除 HKCU Uninstall 登记
+7. 删除整个 %LOCALAPPDATA%\Programs\LanDrop
+8. 按用户选择处理 %LOCALAPPDATA%\LanDrop 数据
+9. 若日志保留，持久记录 uninstall_completed；若日志删除，仅由临时卸载日志和完成页表达结果
+10. 启动系统现成的无窗口自清理步骤
+11. 临时 Uninstall 退出后删除 %TEMP%\LanDrop\uninstall-* 目录
 ```
 
 若某一步失败，不得虚报“已完整卸载”；应明确残留项并允许用户重试或查看日志。
 
 程序根、事务目录、临时卸载目录和用户数据清理统一使用同一套边界：canonical path 必须位于预期产品根；不得跟随 symlink、junction 或 reparse point；遇到未知 reparse object 必须终止对应递归清理并报告残留。
+
+临时目录自清理器必须在待删除目录之外启动并使用外部工作目录（例如 `%TEMP%`），同时等待临时 Uninstall 的 Python 子进程和 PyInstaller onefile 父 bootloader 进程全部退出。删除采用约 10～15 秒的短间隔有限重试，并在每次尝试后确认目标目录是否仍存在；只有目标确实消失时清理器才返回成功。结果页在进程仍存活时只能显示“等待最终清理”，不得把成功调度等同于完整清理；最终重试仍失败时必须给出原生警告，不得静默吞掉。目标必须仍通过严格 `%TEMP%\LanDrop\uninstall-*` 边界验证，禁止删除该根以外对象。
 
 ### P8-S22：用户数据清理
 
@@ -609,7 +614,7 @@ request 至少包含：创建时间、过期时间、原卸载器 PID、固定�
 - 用户后来选择的其他接收目录；
 - 这些目录中的任何正常用户文件。
 
-P8-S19～S22 实现结果（2026-09-25）：正式 `Uninstall.exe` 已替换第八阶段早期安全占位入口。安装目录进程生成规范化 request 和独立命令行 nonce/expected hash，复制自身到严格命名的 `%TEMP%\LanDrop\uninstall-*`；临时副本等待原 PyInstaller 父/子进程完全退出，取得生命周期锁后复核当前 `install.json`、版本/build、事务状态和正式进程，再按四对象清单移除仍精确匹配的系统入口。程序根删除和三类用户数据清理均先完成 canonical/reparse 预检；配置和可信客户机使用精确文件白名单，日志使用精确名称白名单，未知数据保留，所有收发目录始终不参与清理。TEMP 自清理必须成功调度后才允许结果页报告完整成功。
+P8-S19～S22 实现结果（2026-09-25）：正式 `Uninstall.exe` 已替换第八阶段早期安全占位入口。安装目录进程生成规范化 request 和独立命令行 nonce/expected hash，复制自身到严格命名的 `%TEMP%\LanDrop\uninstall-*`；临时副本等待原 PyInstaller 父/子进程完全退出，取得生命周期锁后复核当前 `install.json`、版本/build、事务状态和正式进程，再按五对象清单移除仍精确匹配的系统入口及 cleanup-only 派生状态。程序根删除和三类用户数据清理均先完成 canonical/reparse 预检；配置和可信客户机使用精确文件白名单，日志使用精确名称白名单，未知数据保留，所有收发目录始终不参与清理。实机发现的一次性清理调度不足已修正为外部 cwd、等待 onefile 父/子进程、有限重试并确认目录消失。
 
 ## 九、自动化与本机构建回归
 
@@ -765,10 +770,10 @@ P8-S19～S22 实现结果（2026-09-25）：正式 `Uninstall.exe` 已替换第�
 - Uninstall 迁到 `%TEMP%` 后原安装目录可完整删除；
 - request nonce、独立 expected SHA-256、过期时间、原 PID 和临时副本自身哈希均通过；篡改/陈旧 request 被拒绝；
 - 原卸载确认页保持打开期间完成 A→B 升级后，旧临时卸载 request 即使随后取得生命周期锁，也会因当前 `install.json` 的 version/build id 不匹配而被拒绝；从当前 Windows 卸载入口重新启动后方可继续；
-- Run、快捷方式、Uninstall 登记消失；
+- Run、精确 `StartupApproved\Run\LanDrop` 派生状态、快捷方式和 Uninstall 登记消失，其他 `StartupApproved` value 不变；
 - `%LOCALAPPDATA%\LanDrop` 按选择保留；
 - Shared/Received 与自定义用户目录完整；
-- 临时卸载目录最终被自清理。
+- 清理器 cwd 不位于目标目录内，等待 onefile 父/子进程、有限重试并确认临时卸载目录最终消失；不得越出严格的卸载临时根。
 
 ### P8-T12：卸载——删除用户数据
 
@@ -887,6 +892,7 @@ LanDrop-Setup.exe
 - [ ] 开始菜单、默认不勾选的可选桌面快捷方式、AUMID、HKCU Run 正常；
 - [ ] 任务管理器/Windows 启动应用页可禁用自启动，且 LanDrop 不自动恢复；
 - [ ] 升级保留 Run/StartupApproved 当前状态，未获明确选择时不恢复用户删除的 Run；
+- [ ] 完整卸载只删除精确 `StartupApproved\Run\LanDrop` REG_BINARY 派生状态，其他 value 保持不变，异常类型被保留并报告；
 - [ ] Windows 设置与控制面板均可见并可调用卸载；
 - [ ] Setup/LanDrop/Uninstall 均未主动写防火墙或网络配置；
 - [x] WebView2 不捆绑、不联网安装，缺失时安全阻断；
@@ -897,9 +903,10 @@ LanDrop-Setup.exe
 - [x] Uninstall 能在隔离测试根迁出安装目录后删除完整程序根；正式根实机验证待本机生命周期回归；
 - [x] 临时卸载 request 绑定、时效、自身哈希、锁后权威 `install.json` 复核与统一 reparse 安全边界通过；
 - [x] 系统集成对象清单明确，卸载器只删除自身实际创建且匹配的对象；
+- [x] TEMP 自清理器使用目标外 cwd、等待 onefile 父/子进程、有限重试和最终不存在确认；
 - [x] 用户数据删除/保留符合选择；
 - [x] Shared/Received 和自定义用户文件目录永不删除；
-- [x] 既有回归及 Phase 8 新增自动化合计 169 项全部通过；
+- [x] 既有回归及 Phase 8 新增自动化合计 180 项全部通过；
 - [ ] 本机安装/升级/卸载完整生命周期通过。
 
 **最终发布验收**还必须额外满足：

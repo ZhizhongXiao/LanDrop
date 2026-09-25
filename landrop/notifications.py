@@ -16,6 +16,9 @@ AUTOMATIC_STOP_MESSAGES = {
     "grace_timeout": "传输宽限时间已结束，端口 8000 已关闭。",
     "system_resume": "检测到服务机从睡眠恢复，服务和端口已安全关闭。",
     "network_changed": "网络环境已变化，服务和端口已安全关闭。",
+    "network_category_unavailable": (
+        "无法确认当前网络仍为 Private，服务和端口已安全关闭。"
+    ),
 }
 
 

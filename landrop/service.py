@@ -557,7 +557,11 @@ class ServiceController:
                 self._set_endpoint_status(server, "healthy", "运行期 endpoint 校验正常。")
                 continue
 
-            self._set_endpoint_status(server, "confirming", _observation_detail(observation))
+            self._set_endpoint_status(
+                server,
+                "confirming",
+                _observation_detail(observation, include_category=include_category),
+            )
             if stop_check.wait(self._endpoint_confirmation_delay):
                 return
             confirmed = checker.observe(include_category=include_category)
@@ -571,10 +575,15 @@ class ServiceController:
             if _endpoint_observation_matches(confirmed, include_category):
                 self._set_endpoint_status(server, "healthy", "瞬时异常已恢复，服务继续。")
                 continue
-            self._stop_for_network_change(
+            stop_reason = _observation_stop_reason(
+                confirmed,
+                include_category=include_category,
+            )
+            self._stop_for_network_issue(
                 server,
                 lifecycle,
-                _observation_detail(confirmed),
+                stop_reason,
+                _observation_detail(confirmed, include_category=include_category),
             )
             return
 
@@ -593,17 +602,28 @@ class ServiceController:
         lifecycle: SessionLifecycle,
         detail: str,
     ) -> None:
+        self._stop_for_network_issue(server, lifecycle, "network_changed", detail)
+
+    def _stop_for_network_issue(
+        self,
+        server: Any,
+        lifecycle: SessionLifecycle,
+        reason: str,
+        detail: str,
+    ) -> None:
+        endpoint_status = "unavailable" if reason == "network_category_unavailable" else "changed"
         with self._lock:
             if self._server is not server or self._lifecycle is not lifecycle:
                 return
             self._snapshot = replace(
                 self._snapshot,
-                endpoint_status="changed",
+                endpoint_status=endpoint_status,
                 endpoint_detail=detail,
             )
-        logger.warning("[网络变化] %s", detail)
+        label = "网络类别无法确认" if reason == "network_category_unavailable" else "网络变化"
+        logger.warning("[%s] %s", label, detail)
         self.stop(
-            "network_changed",
+            reason,
             _expected_server=server,
             _expected_lifecycle=lifecycle,
         )
@@ -773,6 +793,9 @@ def _stop_message(reason: str) -> str:
         "grace_timeout": "传输宽限时间已结束，端口已强制关闭。",
         "system_resume": "检测到服务机从睡眠恢复，会话已安全终止。",
         "network_changed": "网络环境已变化，传输服务已安全停止，请重新开启。",
+        "network_category_unavailable": (
+            "无法确认当前网络仍为 Private，传输服务已安全停止，请检查网络后重新开启。"
+        ),
     }
     return messages.get(reason, "服务已停止，端口已关闭。")
 
@@ -783,7 +806,15 @@ def _endpoint_observation_matches(observation: Any, include_category: bool) -> b
     return not include_category or observation.category_private
 
 
-def _observation_detail(observation: Any) -> str:
+def _observation_detail(observation: Any, *, include_category: bool = False) -> str:
+    if include_category and observation.address_present is True:
+        category = (observation.category or "").strip()
+        if observation.error:
+            return f"category_unavailable：{observation.error}"
+        if not category or category.casefold() == "unknown":
+            return "category_unavailable：Windows 返回 Unknown，无法确认当前网络仍为 Private"
+        if category.casefold() != "private":
+            return f"category_changed：当前网络类别为 {category}"
     if observation.error:
         return f"monitor_error：{observation.error}"
     if observation.address_present is not True:
@@ -791,6 +822,14 @@ def _observation_detail(observation: Any) -> str:
     if observation.category and not observation.category_private:
         return f"category_changed：当前网络类别为 {observation.category}"
     return "endpoint_changed：当前 endpoint 与启动基线不一致"
+
+
+def _observation_stop_reason(observation: Any, *, include_category: bool) -> str:
+    if include_category and observation.address_present is True:
+        category = (observation.category or "").strip().casefold()
+        if observation.error or not category or category == "unknown":
+            return "network_category_unavailable"
+    return "network_changed"
 
 
 def _interface_diagnostic(interface: Any) -> dict[str, object]:

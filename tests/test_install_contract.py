@@ -51,9 +51,17 @@ class InstallContractTests(unittest.TestCase):
                     "desktop_shortcut",
                     "run_value",
                     "uninstall_key",
+                    "startup_approved_run_value",
                 },
             )
             self.assertTrue(next(item for item in objects if item.object_id == "desktop_shortcut").optional)
+            startup_approved = next(
+                item
+                for item in objects
+                if item.object_id == "startup_approved_run_value"
+            )
+            self.assertTrue(startup_approved.optional)
+            self.assertTrue(startup_approved.cleanup_only)
             self.assertFalse(any("firewall" in item.identifier.casefold() for item in objects))
 
     def test_environment_paths_must_be_absolute(self) -> None:

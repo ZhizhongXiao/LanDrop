@@ -32,9 +32,11 @@ class _SequenceEndpointChecker:
     def __init__(self, observations: list[EndpointObservation]) -> None:
         self._observations = list(observations)
         self._lock = threading.Lock()
+        self.calls = 0
 
     def observe(self, *, include_category: bool = False) -> EndpointObservation:
         with self._lock:
+            self.calls += 1
             if len(self._observations) > 1:
                 return self._observations.pop(0)
             return self._observations[0]
@@ -282,6 +284,76 @@ class ServiceControllerTests(unittest.TestCase):
         self.assertEqual(state.endpoint_status, "healthy")
         self.assertIn("瞬时异常已恢复", state.endpoint_detail)
 
+    def test_transient_category_failure_recovers_and_service_continues(self) -> None:
+        checker = _SequenceEndpointChecker(
+            [
+                EndpointObservation(True, error="网络类别查询失败：temporary"),
+                EndpointObservation(True, category="Private"),
+            ]
+        )
+        self.controller._endpoint_checker_factory = lambda _baseline: checker
+        self.controller._endpoint_check_interval = 0.1
+        # Make the first monitor tick unambiguously exercise the category path;
+        # equality with the endpoint interval is scheduler-dependent.
+        self.controller._category_check_interval = 0.0
+        self.controller._endpoint_confirmation_delay = 0.05
+
+        self.controller.start(self.shared, self.received)
+        time.sleep(0.3)
+
+        state = self.controller.snapshot()
+        self.assertTrue(state.running)
+        self.assertEqual(state.endpoint_status, "healthy")
+        self.assertNotEqual(state.stop_reason, "network_category_unavailable")
+
+    def test_repeated_category_failure_stops_as_category_unavailable(self) -> None:
+        checker = _SequenceEndpointChecker(
+            [
+                EndpointObservation(True, error="网络类别查询失败：timeout"),
+                EndpointObservation(True, error="网络类别查询失败：timeout"),
+            ]
+        )
+        self.controller._endpoint_checker_factory = lambda _baseline: checker
+        self.controller._endpoint_check_interval = 0.1
+        self.controller._category_check_interval = 0.0
+        self.controller._endpoint_confirmation_delay = 0.05
+
+        self.controller.start(self.shared, self.received)
+        deadline = time.monotonic() + 1.5
+        while self.controller.snapshot().running and time.monotonic() < deadline:
+            time.sleep(0.02)
+
+        state = self.controller.snapshot()
+        self.assertFalse(state.running)
+        self.assertEqual(state.stop_reason, "network_category_unavailable")
+        self.assertEqual(state.endpoint_status, "unavailable")
+        self.assertIn("category_unavailable", state.endpoint_detail)
+        self.assertIn("无法确认当前网络仍为 Private", state.message)
+
+    def test_repeated_unknown_category_is_not_reported_as_category_change(self) -> None:
+        checker = _SequenceEndpointChecker(
+            [
+                EndpointObservation(True, category="Unknown"),
+                EndpointObservation(True, category="Unknown"),
+            ]
+        )
+        self.controller._endpoint_checker_factory = lambda _baseline: checker
+        self.controller._endpoint_check_interval = 0.1
+        self.controller._category_check_interval = 0.0
+        self.controller._endpoint_confirmation_delay = 0.05
+
+        self.controller.start(self.shared, self.received)
+        deadline = time.monotonic() + 1.5
+        while self.controller.snapshot().running and time.monotonic() < deadline:
+            time.sleep(0.02)
+
+        state = self.controller.snapshot()
+        self.assertFalse(state.running)
+        self.assertEqual(state.stop_reason, "network_category_unavailable")
+        self.assertEqual(state.endpoint_status, "unavailable")
+        self.assertIn("Windows 返回 Unknown", state.endpoint_detail)
+        self.assertNotIn("category_changed", state.endpoint_detail)
+
     def test_repeated_missing_endpoint_stops_with_network_changed(self) -> None:
         checker = _SequenceEndpointChecker(
             [EndpointObservation(False), EndpointObservation(False)]
@@ -319,6 +391,7 @@ class ServiceControllerTests(unittest.TestCase):
         self.assertFalse(state.running)
         self.assertEqual(state.stop_reason, "network_changed")
         self.assertIn("Public", state.endpoint_detail)
+        self.assertEqual(checker.calls, 1)
 
     def test_deep_diagnostics_does_not_block_service_start(self) -> None:
         release = threading.Event()

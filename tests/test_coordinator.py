@@ -259,6 +259,39 @@ class ActionCoordinatorTests(unittest.TestCase):
         self.assertIn("toast:network_changed", events)
         self.assertLess(events.index("tray_stopped"), events.index("toast:network_changed"))
 
+    def test_category_unavailable_publishes_stopped_state_then_sends_notice(self) -> None:
+        events: list[str] = []
+        coordinator = ActionCoordinator(
+            self.controller,
+            self.window,
+            toasts=self.toasts,
+            on_state_changed=lambda state: events.append("tray_stopped")
+            if not state.running
+            else None,
+        )
+        coordinator.start_expiry_monitor(
+            lambda _session, _revision: False,
+            lambda reason: events.append(f"toast:{reason}") or True,
+        )
+        time.sleep(0.3)
+
+        self.controller.state = ServiceSnapshot(
+            **{
+                **self.controller.state.to_dict(),
+                "running": False,
+                "phase": "stopped",
+                "stop_reason": "network_category_unavailable",
+            }
+        )
+        deadline = time.monotonic() + 1
+        expected = "toast:network_category_unavailable"
+        while expected not in events and time.monotonic() < deadline:
+            time.sleep(0.01)
+        coordinator.request_exit()
+
+        self.assertIn(expected, events)
+        self.assertLess(events.index("tray_stopped"), events.index(expected))
+
     def test_window_can_reopen_while_toast_stop_is_still_finishing(self) -> None:
         controller = _BlockingStopController()
         window = _Window()

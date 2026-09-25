@@ -109,6 +109,19 @@ class UninstallApi:
                     self.current_executable.parent,
                     self.service.paths,
                 )
+                if outcome.complete:
+                    outcome = UninstallOutcome(
+                        complete=False,
+                        finalization_pending=True,
+                        message=(
+                            "LanDrop 程序与所选数据已移除。"
+                            "关闭此窗口后将完成临时卸载文件清理。"
+                        ),
+                        removed_integration=outcome.removed_integration,
+                        absent_integration=outcome.absent_integration,
+                        residuals=outcome.residuals,
+                        deleted_data=outcome.deleted_data,
+                    )
             except Exception as exc:
                 outcome = UninstallOutcome(
                     complete=False,
@@ -223,9 +236,9 @@ def main(argv: list[str] | None = None) -> int:
         "卸载 LanDrop",
         url=resource_path("ui/uninstall/index.html").as_uri(),
         js_api=api,
-        width=920,
-        height=620,
-        min_size=(760, 560),
+        width=840,
+        height=560,
+        min_size=(720, 500),
         resizable=True,
         background_color="#eaf5ff",
     )

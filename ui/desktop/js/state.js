@@ -19,6 +19,7 @@ const reasonLabels = {
   system_resume: "睡眠恢复",
   client_disconnect: "客户机主动断开",
   network_changed: "网络环境变化",
+  network_category_unavailable: "无法确认网络类别",
   storage_error: "文件或磁盘错误",
   server_error: "服务器异常",
   size_limit: "超过大小限制",
@@ -165,6 +166,7 @@ function renderDiagnostics(state, stats) {
     healthy: "正常",
     confirming: "正在二次确认",
     changed: "已变化",
+    unavailable: "无法确认",
     inactive: "未启用"
   };
   $("endpointHealth").textContent = `${endpointLabels[state.endpoint_status] || state.endpoint_status || "未启用"}${state.endpoint_detail ? `；${state.endpoint_detail}` : ""}`;

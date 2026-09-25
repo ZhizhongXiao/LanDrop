@@ -101,6 +101,34 @@ class DesktopResourceTests(unittest.TestCase):
             self.assertNotRegex(html, r"(?is)<style(?:\s|>)")
             self.assertNotRegex(html, r"(?is)<script(?![^>]+\bsrc=)[^>]*>")
 
+    def test_wizard_fills_a_compact_native_window(self) -> None:
+        stylesheet = (PROJECT_ROOT / "ui" / "wizard" / "css" / "wizard.css").read_text(
+            encoding="utf-8"
+        )
+        self.assertRegex(stylesheet, r"(?s)body\s*\{[^}]*overflow:\s*hidden")
+        self.assertRegex(
+            stylesheet,
+            r"(?s)\.wizard-shell\s*\{[^}]*width:\s*100%[^}]*height:\s*100vh",
+        )
+        self.assertNotIn("padding: 24px", stylesheet)
+        self.assertNotIn("border-radius: 24px", stylesheet)
+
+        for source_name in ("setup_app.py", "uninstall_app.py"):
+            source = (PROJECT_ROOT / "landrop" / source_name).read_text(encoding="utf-8")
+            self.assertIn("width=840", source)
+            self.assertIn("height=560", source)
+            self.assertIn("min_size=(720, 500)", source)
+
+        setup_html = (PROJECT_ROOT / "ui" / "setup" / "index.html").read_text(
+            encoding="utf-8"
+        )
+        setup_script = (PROJECT_ROOT / "ui" / "setup" / "js" / "setup.js").read_text(
+            encoding="utf-8"
+        )
+        self.assertNotIn("开机行为", setup_html)
+        self.assertNotIn("desktopSummary", setup_html)
+        self.assertNotIn("desktopSummary", setup_script)
+
     def test_all_three_interfaces_share_source_han_and_dark_color_tokens(self) -> None:
         tokens = (DESKTOP_ROOT / "css" / "tokens.css").read_text(encoding="utf-8")
         self.assertIn('"Source Han Sans SC"', tokens)

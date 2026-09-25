@@ -24,6 +24,9 @@ TRANSACTION_STATE_RELATIVE = Path("metadata") / "transaction.json"
 
 RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 RUN_VALUE_NAME = "LanDrop"
+STARTUP_APPROVED_RUN_KEY = (
+    r"Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run"
+)
 UNINSTALL_KEY = r"Software\Microsoft\Windows\CurrentVersion\Uninstall\LanDrop"
 
 _COMPONENT_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z")
@@ -45,12 +48,13 @@ class UnsafeInstallPathError(InstallContractError):
 
 @dataclass(frozen=True, slots=True)
 class SystemIntegrationObject:
-    """One exact Windows object that Setup may own and Uninstall may remove."""
+    """One exact Windows object allowed by the installation lifecycle."""
 
     object_id: str
     kind: str
     identifier: str
     optional: bool = False
+    cleanup_only: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -170,6 +174,13 @@ class InstallPaths:
                 "uninstall_key",
                 "registry_key",
                 f"HKCU\\{UNINSTALL_KEY}",
+            ),
+            SystemIntegrationObject(
+                "startup_approved_run_value",
+                "registry_value",
+                f"HKCU\\{STARTUP_APPROVED_RUN_KEY}\\{RUN_VALUE_NAME}",
+                optional=True,
+                cleanup_only=True,
             ),
         )
 

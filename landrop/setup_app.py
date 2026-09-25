@@ -282,9 +282,9 @@ def main(argv: list[str] | None = None) -> int:
             "安装 LanDrop",
             url=bundle.ui_entry.as_uri(),
             js_api=api,
-            width=920,
-            height=620,
-            min_size=(760, 560),
+            width=840,
+            height=560,
+            min_size=(720, 500),
             resizable=True,
             background_color="#eaf5ff",
         )

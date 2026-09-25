@@ -43,9 +43,9 @@ async function pollExecution() {
     return;
   }
   const outcome = status.outcome || {};
-  document.getElementById("executionTitle").textContent = outcome.complete
-    ? "卸载完成"
-    : "卸载未完全完成";
+  document.getElementById("executionTitle").textContent = outcome.finalization_pending
+    ? "等待最终清理"
+    : (outcome.complete ? "卸载完成" : "卸载未完全完成");
   document.getElementById("executionMessage").textContent = outcome.message || "卸载流程已结束。";
   const residuals = outcome.residuals || [];
   const residualPanel = document.getElementById("executionResiduals");
@@ -56,7 +56,7 @@ async function pollExecution() {
   }
   const next = document.getElementById("next");
   next.disabled = false;
-  next.textContent = "关闭";
+  next.textContent = outcome.finalization_pending ? "关闭并完成清理" : "关闭";
   next.onclick = async event => {
     event.stopImmediatePropagation();
     await window.pywebview.api.close_window();

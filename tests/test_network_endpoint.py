@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 import unittest
+from unittest.mock import patch
+import subprocess
 
 from landrop.network import (
     EndpointBaseline,
     EndpointChecker,
     LanInterface,
     NetworkDiscoveryError,
+    RUNTIME_CATEGORY_TIMEOUT_SECONDS,
+    read_network_category,
     select_interface,
 )
 
@@ -75,6 +79,44 @@ class EndpointCheckerTests(unittest.TestCase):
         self.assertEqual(calls, [12])
         self.assertIsNone(lightweight.category)
         self.assertTrue(categorized.explicitly_public)
+
+    def test_runtime_category_queries_only_the_frozen_interface(self) -> None:
+        completed = subprocess.CompletedProcess(
+            args=[],
+            returncode=0,
+            stdout=(
+                '{"alias":"Ethernet","interface_index":12,'
+                '"category":"Private","connectivity":"Internet","name":"LAN"}'
+            ),
+            stderr="",
+        )
+        with (
+            patch("landrop.network.subprocess.run", return_value=completed) as run,
+            patch("landrop.network._read_connection_profiles_result") as full_reader,
+            patch("landrop.network._read_wifi_registry_profile") as wifi_fallback,
+        ):
+            category = read_network_category(12, alias="WLAN")
+
+        self.assertEqual(category, "Private")
+        command = run.call_args.args[0]
+        self.assertIn("Get-NetConnectionProfile -InterfaceIndex 12", command[-1])
+        self.assertEqual(run.call_args.kwargs["timeout"], 4.0)
+        self.assertEqual(RUNTIME_CATEGORY_TIMEOUT_SECONDS, 4.0)
+        full_reader.assert_not_called()
+        wifi_fallback.assert_not_called()
+
+    def test_runtime_category_timeout_does_not_use_registry_fallback(self) -> None:
+        with (
+            patch(
+                "landrop.network.subprocess.run",
+                side_effect=subprocess.TimeoutExpired("powershell", 4.0),
+            ),
+            patch("landrop.network._read_wifi_registry_profile") as wifi_fallback,
+        ):
+            with self.assertRaisesRegex(NetworkDiscoveryError, "查询超时"):
+                read_network_category(12, alias="WLAN")
+
+        wifi_fallback.assert_not_called()
 
     def test_explicit_public_interface_is_rejected_before_start(self) -> None:
         public = LanInterface(

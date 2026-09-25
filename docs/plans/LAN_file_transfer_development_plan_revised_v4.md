@@ -4,7 +4,7 @@
 
 > 文档状态：修订稿 v4（第八阶段方案冻结版，持续记录阶段实施结果）
 > 适用对象：具备基础 Python 使用经验、暂不了解计算机通信原理的个人开发者
-> 当前进度：第六阶段已以 `0.6.0` 收官；第七阶段开发验收已通过并冻结为第八阶段基线。第八阶段 Phase 8A～8D 的安装状态、首次安装、事务升级/回滚和真实 Uninstall 开发实现已经完成，169 项自动化回归及主程序 onedir、Setup/Uninstall onefile 构建自检通过。下一门槛是当前机器真实安装/升级/卸载生命周期审计；第二台无 Python/无源码干净 Windows 11 的完整发布验收仍延期保留，完成前不得宣称正式发布验收结束。
+> 当前进度：第六阶段已以 `0.6.0` 收官；第七阶段开发验收已通过并冻结为第八阶段基线。第八阶段 Phase 8A～8D 的安装状态、首次安装、事务升级/回滚和真实 Uninstall 开发实现已经完成。首次本机 A→B→保留数据卸载暴露的 onefile TEMP 自清理与 `StartupApproved` 派生状态残留已在 Phase 8D.1 修复；180 项自动化回归及主程序 onedir、Setup/Uninstall onefile 构建自检通过。下一门槛是从 A 重新执行完整本机生命周期审计；第二台无 Python/无源码干净 Windows 11 的完整发布验收仍延期保留，完成前不得宣称正式发布验收结束。
 > 暂定平台：Windows 11 服务机 + Android/Windows 浏览器客户机
 
 ## 1. 项目目标
@@ -836,10 +836,10 @@ Setup、临时 Uninstall、LanDrop 正常启动和 `pending_cleanup` 共用一�
 
 - 必建当前用户开始菜单快捷方式；桌面快捷方式作为安装选项，默认不勾选；
 - 继续使用稳定 AUMID `LanDrop.Desktop`，验证快捷方式、当前进程和 Windows-Toasts 的通知身份一致；
-- 首次安装按既定方案在 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` 注册 `LanDrop.exe --startup`，使用户能够在 Windows“启动应用”/任务管理器启动页禁用；升级默认保留当前自启动状态，不写或重置 `StartupApproved`。稳定路径未变化时不重写 Run；若用户已经禁用或主动删除 Run，LanDrop 和 Setup 都不得自行恢复，除非用户在 Setup 中明确重新选择启用；
+- 首次安装按既定方案在 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` 注册 `LanDrop.exe --startup`，使用户能够在 Windows“启动应用”/任务管理器启动页禁用；Setup 不创建或写入 `StartupApproved`，升级也不写、不删除、不重置其中状态。稳定路径未变化时不重写 Run；若用户已经禁用或主动删除 Run，LanDrop 和 Setup 都不得自行恢复，除非用户在 Setup 中明确重新选择启用；
 - `--startup` 只启动桌面程序并进入托盘，传输服务默认关闭，TCP 8000 不监听；
 - 在 `HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\LanDrop` 登记 `DisplayName`、`DisplayVersion`、`Publisher`、`DisplayIcon`、`InstallLocation`、`UninstallString`、`EstimatedSize` 等标准字段，第一版使用 `NoModify=1`、`NoRepair=1`；
-- 编码前形成明确的系统集成对象清单；当前确定对象仅包括开始菜单 `.lnk`、可选桌面 `.lnk`、HKCU Run 和 HKCU Uninstall。`SetCurrentProcessExplicitAppUserModelID` 是运行时调用，不是卸载对象；Toast 若最终需要快捷方式 Property Store、注册表或 COM 激活登记，必须按实际实现把精确对象追加到清单，卸载器不得使用泛化的“通知身份相关安装项”猜测删除；
+- 编码前形成明确的系统集成对象清单；当前确定对象包括开始菜单 `.lnk`、可选桌面 `.lnk`、HKCU Run、HKCU Uninstall，以及 cleanup-only 的 `HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run\LanDrop` 派生 value。前四项由 Setup 创建并由 Uninstall 按精确所有权删除；第五项由 Windows 根据 LanDrop Run 项派生，Setup 不创建、升级不修改，完整卸载时仅在它是 `REG_BINARY` 时删除该精确 value，不存在视为正常，类型异常则保留并报告残留。`SetCurrentProcessExplicitAppUserModelID` 是运行时调用，不是卸载对象；Toast 若最终需要快捷方式 Property Store、注册表或 COM 激活登记，必须按实际实现把精确对象追加到清单，卸载器不得使用泛化的“通知身份相关安装项”猜测删除；
 - 目标是让当前用户在 Windows 设置“已安装的应用”和控制面板“程序和功能”中都能看到 LanDrop，并从两个入口调用同一个卸载器。
 
 防火墙与网络边界继续完全沿用第六、七阶段：**Setup、LanDrop、Uninstall 都不创建、修改或删除防火墙规则，不修改 Private/Public、代理、VPN 或静态 IP。** 首次正式 `LanDrop.exe` 监听 TCP 8000 时，如果 Windows 自身显示网络访问授权提示，由用户选择；不同机器/策略下提示是否出现不作为程序逻辑假设。干净机发布验收需要观察实际 Windows 行为、必要时检查系统生成的规则，并验证拒绝或无规则时 LanDrop 的只读诊断和设置入口仍然有效。
@@ -872,7 +872,7 @@ Setup、临时 Uninstall、LanDrop 正常启动和 `pending_cleanup` 共用一�
 
 卸载器采用“先迁出，再删除程序根”的完整迁出方式。安装目录内的 `maintenance\Uninstall.exe` 先确认 LanDrop 未运行，再生成带创建/过期时间、原卸载器 PID、安装根、当前版本/build id、用户数据选择和源卸载器哈希的规范化 request JSON，把自身与 request 复制到 `%TEMP%\LanDrop\uninstall-<random-id>\`，并通过命令行把独立的随机 nonce 与 `expected_request_sha256` 交给临时副本。临时 Uninstall 验证 request、时效、路径及自身 SHA-256 与源卸载器一致后，必须先取得安装生命周期锁，再重新读取当前权威 `install.json`，确认 product id、version/build id 和固定安装根仍与 request 一致；若安装状态已变化、`transaction.json` 存在或状态无法安全解释，则拒绝旧 request，并要求用户从当前 Windows 卸载入口重新启动 Uninstall。该绑定用于防止陈旧请求、路径错配和异常交接，不扩展成抵御恶意本机用户的复杂认证协议。验证全部通过后，临时副本才严格按系统集成对象清单清理并删除整个 `%LOCALAPPDATA%\Programs\LanDrop`。
 
-程序根、事务目录和用户数据删除统一使用同一套路径安全规则：canonical path 必须落在预期产品根；不跟随 symlink、junction 或其他 reparse point；遇到未知 reparse object 宁可终止并报告残留，不继续递归删除。临时卸载器退出后，再由系统现成的无窗口清理步骤删除临时卸载目录。
+程序根、事务目录和用户数据删除统一使用同一套路径安全规则：canonical path 必须落在预期产品根；不跟随 symlink、junction 或其他 reparse point；遇到未知 reparse object 宁可终止并报告残留，不继续递归删除。临时卸载器退出后，由工作目录位于目标之外的无窗口清理器等待临时 Python 子进程与 PyInstaller onefile 父 bootloader 全部结束，再在约 10～15 秒内有限重试删除严格命名的临时卸载目录；只有确认目录已经不存在时才返回成功，结果页在此之前只显示“等待最终清理”，最终失败则给出原生警告，不得静默吞掉，也不得越出 `%TEMP%\LanDrop\uninstall-*` 边界。
 
 卸载 UI 必须继续明确区分“删除程序”和“删除用户数据”。配置、日志、可信客户机数据按用户选择处理；如选择删除，只能在 `%LOCALAPPDATA%\LanDrop` 的已知产品范围内执行白名单清理。保留日志时，`install-history.jsonl` 持久记录 `uninstall_started/uninstall_completed`；删除日志时不承诺永久保存 `uninstall_completed`，本次结果由临时卸载日志和完成页表达，随后随临时目录清理。无论任何卸载选择，`Downloads\LanDrop\Shared`、`Downloads\LanDrop\Received` 及用户自定义的实际共享/接收目录都视为用户文件，**绝不由卸载器删除**。
 
@@ -964,10 +964,11 @@ Setup、临时 Uninstall、LanDrop 正常启动和 `pending_cleanup` 共用一�
 | 2026-09-20 | 临时卸载使用独立 nonce/expected hash 绑定请求，所有删除统一拒绝 reparse 跟随 | 防止陈旧请求、路径错配和异常交接；未知链接对象宁可报告残留，也不冒险递归删除外部数据 |
 | 2026-09-20 | `--self-check` 作为无副作用维护模式绕过生命周期锁；普通启动发现未完成 transaction 时必须拒绝 | Setup 可以在持续持锁时验证新 app，不重新打开 TOCTOU 窗口；Setup 崩溃后也不会让未提交的新 app 被用户直接运行 |
 | 2026-09-24 | 临时卸载取得生命周期锁后重读权威 `install.json` 并与 request 复核 | 防止卸载确认页停留期间完成升级后，旧版本 request 删除已经变化的新安装；不要求原卸载 UI 长时间占锁 |
-| 2026-09-25 | Phase 8A～8D 开发实现完成，临时 Uninstall 使用绑定 request、精确对象移除和统一 reparse 边界 | 169 项自动化与 Setup/Uninstall onefile 构建自检已通过；真实当前用户安装根生命周期与干净机发布验收仍保持为独立门槛 |
+| 2026-09-25 | Phase 8A～8D 开发实现完成，临时 Uninstall 使用绑定 request、精确对象移除和统一 reparse 边界 | 当时 169 项自动化与 Setup/Uninstall onefile 构建自检通过；真实当前用户安装根生命周期与干净机发布验收仍保持为独立门槛 |
+| 2026-09-25 | 完整卸载清理精确 StartupApproved 派生状态，onefile TEMP 清理等待父/子进程并有限重试 | 实机发现 Windows 会保留 Run 派生禁用状态，且一次性清理可能早于 bootloader 退出；两项均需在重新开始生命周期验收前闭合 |
 
 ## 10. 下一步
 
-第八阶段 Phase 8A～8D 开发实现已经完成：安装布局、payload 清单、权威安装状态、当前用户系统集成、事务升级/回滚、`pending_cleanup` 和临时卸载器完整迁出均已通过自动化，当前完整回归为 169 项；主程序 onedir、Uninstall onefile 与 Setup onefile 已在冻结构建基线上重新生成并通过自检。下一步先做 Phase 8A～8D 整体生命周期审计，再在当前机器执行真实 `Setup A → 运行 A → Setup B → 运行 B → Windows 卸载`，核对固定程序根、HKCU Run/Uninstall、快捷方式、TEMP 自清理、数据选择和用户收发文件。
+第八阶段 Phase 8A～8D 开发实现已经完成：安装布局、payload 清单、权威安装状态、当前用户系统集成、事务升级/回滚、`pending_cleanup` 和临时卸载器完整迁出均已通过自动化。首次本机真实生命周期已经执行到保留数据卸载，并据实机残留完成 Phase 8D.1 修复；当前完整回归为 180 项，主程序 onedir、Uninstall onefile 与 Setup onefile 已在冻结构建基线上重新生成并通过自检。失败现场已经记录，两个精确残留已清理且用户数据/收发哨兵复核完整。下一步从 A 重新执行 `Setup A → 运行 A → Setup B → 运行 B → Windows 卸载`，重点复核精确 StartupApproved 清理、TEMP 自清理、数据选择和用户收发文件。
 
 本机生命周期回归通过后，再在无源码、无 venv、无独立 Python 的干净 Windows 11 上完成最终发布验收。该环境必须从单个 `LanDrop-Setup.exe` 开始验证 WebView2 前置检查、安装、Private 真实传输、Windows 原生防火墙行为、自启动但服务默认关闭、Public 拒绝、升级、卸载和系统状态恢复。第七阶段延期的干净环境验收与第八阶段发布验收合并执行；完成前不得宣称正式发布验收结束。
