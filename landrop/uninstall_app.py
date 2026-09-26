@@ -234,7 +234,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     window = webview.create_window(
         "卸载 LanDrop",
-        url=resource_path("ui/uninstall/index.html").as_uri(),
+        url=_uninstall_ui_url(temporary_mode=temporary_mode),
         js_api=api,
         width=840,
         height=560,
@@ -257,12 +257,18 @@ def main(argv: list[str] | None = None) -> int:
 def _required_resources() -> tuple[Path, ...]:
     return (
         resource_path("ui/uninstall/index.html"),
+        resource_path("ui/uninstall/js/mode.js"),
         resource_path("ui/uninstall/js/uninstall.js"),
         resource_path("ui/uninstall/css/uninstall.css"),
         resource_path("ui/wizard/js/wizard.js"),
         resource_path("ui/wizard/css/wizard.css"),
         resource_path("scripts/shortcut-bridge.ps1"),
     )
+
+
+def _uninstall_ui_url(*, temporary_mode: bool) -> str:
+    url = resource_path("ui/uninstall/index.html").as_uri()
+    return f"{url}?mode=temporary" if temporary_mode else url
 
 
 def _show_native_error(message: str) -> None:

@@ -1,3 +1,19 @@
+.temporary-steps {
+  display: none;
+}
+
+.uninstall-temporary .normal-steps {
+  display: none;
+}
+
+.uninstall-temporary .temporary-steps {
+  display: grid;
+}
+
+.uninstall-temporary .wizard-page {
+  display: none;
+}
+
 .execution-panel {
   min-height: 360px;
   padding: 12px 4px;

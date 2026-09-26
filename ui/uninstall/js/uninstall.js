@@ -64,13 +64,21 @@ async function pollExecution() {
 }
 
 function enterTemporaryMode() {
+  document.documentElement.classList.add("uninstall-temporary");
   document.querySelectorAll(".wizard-page").forEach(page => page.classList.remove("active"));
-  document.querySelector(".wizard-steps").hidden = true;
+  document.querySelectorAll(".temporary-steps .wizard-step").forEach(step => {
+    step.classList.add("active");
+    step.classList.remove("done");
+  });
   document.getElementById("executionPanel").hidden = false;
   document.getElementById("back").hidden = true;
   const next = document.getElementById("next");
   next.disabled = true;
   next.textContent = "正在卸载…";
+}
+
+if (document.documentElement.classList.contains("uninstall-temporary")) {
+  enterTemporaryMode();
 }
 
 window.addEventListener("pywebviewready", async () => {

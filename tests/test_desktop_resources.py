@@ -88,6 +88,7 @@ class DesktopResourceTests(unittest.TestCase):
             PROJECT_ROOT / "ui" / "wizard" / "css" / "wizard.css",
             PROJECT_ROOT / "ui" / "wizard" / "js" / "wizard.js",
             PROJECT_ROOT / "ui" / "setup" / "js" / "setup.js",
+            PROJECT_ROOT / "ui" / "uninstall" / "js" / "mode.js",
             PROJECT_ROOT / "ui" / "uninstall" / "js" / "uninstall.js",
             PROJECT_ROOT / "ui" / "uninstall" / "css" / "uninstall.css",
         )
@@ -100,6 +101,20 @@ class DesktopResourceTests(unittest.TestCase):
             self.assertIn("../wizard/js/wizard.js", html)
             self.assertNotRegex(html, r"(?is)<style(?:\s|>)")
             self.assertNotRegex(html, r"(?is)<script(?![^>]+\bsrc=)[^>]*>")
+
+        uninstall_html = (PROJECT_ROOT / "ui" / "uninstall" / "index.html").read_text(
+            encoding="utf-8"
+        )
+        self.assertLess(
+            uninstall_html.index('src="js/mode.js"'),
+            uninstall_html.index('<link rel="stylesheet"'),
+        )
+        self.assertIn('<b>4</b><span>执行清理</span>', uninstall_html)
+        uninstall_css = (
+            PROJECT_ROOT / "ui" / "uninstall" / "css" / "uninstall.css"
+        ).read_text(encoding="utf-8")
+        self.assertIn(".uninstall-temporary .normal-steps", uninstall_css)
+        self.assertIn(".uninstall-temporary .temporary-steps", uninstall_css)
 
     def test_wizard_fills_a_compact_native_window(self) -> None:
         stylesheet = (PROJECT_ROOT / "ui" / "wizard" / "css" / "wizard.css").read_text(

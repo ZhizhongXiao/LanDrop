@@ -6,7 +6,7 @@ import time
 import unittest
 from unittest import mock
 
-from landrop.uninstall_app import UninstallApi, main
+from landrop.uninstall_app import UninstallApi, _uninstall_ui_url, main
 from landrop.uninstaller import UninstallOutcome
 
 
@@ -22,6 +22,15 @@ class _Service:
 
 
 class UninstallAppTests(unittest.TestCase):
+    def test_temporary_ui_url_declares_mode_before_webview_context(self) -> None:
+        page = (Path.cwd() / "ui" / "uninstall" / "index.html").resolve()
+        with mock.patch("landrop.uninstall_app.resource_path", return_value=page):
+            self.assertEqual(
+                _uninstall_ui_url(temporary_mode=True),
+                f"{page.as_uri()}?mode=temporary",
+            )
+            self.assertEqual(_uninstall_ui_url(temporary_mode=False), page.as_uri())
+
     @unittest.skipUnless(os.name == "nt", "Windows WebView2 entry check")
     def test_missing_webview2_stops_before_path_or_product_initialization(self) -> None:
         with (
