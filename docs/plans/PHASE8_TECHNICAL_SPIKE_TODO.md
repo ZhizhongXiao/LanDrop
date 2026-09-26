@@ -1,8 +1,10 @@
 # 第八阶段详细计划：安装器、卸载器与分发
 
-状态：**Phase 8A～8E 开发实现、自动化回归和本机真实安装生命周期开发验收通过；Phase 8F 干净 Windows 11 最终发布验收尚未完成（2026-09-26）**。
+状态：**Phase 8A～8E 开发实现、自动化回归和本机真实安装生命周期开发验收通过；RC1 已被取代，RC2 已冻结；Phase 8F 干净 Windows 11 最终发布验收尚未完成（2026-09-26）**。
 
-实施进度（2026-09-26）：安装契约、生命周期锁、权威状态、首次安装、事务升级/回滚、`pending_cleanup`、临时 Uninstall 迁出、绑定 request、精确系统对象移除及用户数据白名单清理均已落地。实机暴露的 onefile TEMP 自清理时序、`StartupApproved` 派生状态残留和临时卸载页本地资源定位问题均已完成针对性修复。当前完整自动化回归为 182 项且全部通过；Python 3.12 x64 + PyInstaller 6.22.3 生成的主程序 `--onedir`、Uninstall `--onefile --windowed` 和 Setup `--onefile --windowed` 均通过自检。本机已完整走通 A 首装与双向传输、A→B 事务升级、B 双向传输、保留数据卸载、重新安装和删除应用数据卸载；最终无程序根、系统集成、进程、TCP 8000 或 `uninstall-*` TEMP 残留，Shared/Received 文件保持大小与 SHA-256 不变。Phase 8 development acceptance 为 PASS；Phase 8F final release acceptance 仍为 NOT YET COMPLETE。
+实施进度（2026-09-26）：安装契约、生命周期锁、权威状态、首次安装、事务升级/回滚、`pending_cleanup`、临时 Uninstall 迁出、绑定 request、精确系统对象移除及用户数据白名单清理均已落地。实机暴露的 onefile TEMP 自清理时序、`StartupApproved` 派生状态残留和临时卸载页本地资源定位问题均已完成针对性修复。当前完整自动化回归为 182 项且全部通过；Python 3.12 x64 + PyInstaller 6.22.3 生成的主程序 `--onedir`、Uninstall `--onefile --windowed` 和 Setup `--onefile --windowed` 均通过自检。本机已完整走通 A 首装与双向传输、A→B 事务升级、B 双向传输、保留数据卸载、重新安装和删除应用数据卸载；最终无程序根、系统集成、进程、TCP 8000 或 `uninstall-*` TEMP 残留，Shared/Received 文件保持大小与 SHA-256 不变。RC1 未进入最终发布验收即被后续双端 UI/行为调整取代；RC2 已从 `c729a4b` 构建并冻结，Phase 8F 只测试 RC2。Phase 8 development acceptance 为 PASS；Phase 8F final release acceptance 仍为 NOT YET COMPLETE。
+
+> 0.6.0-rc1 was superseded before final release acceptance by post-RC1 UI/behavior changes.
 
 前置条件：第七阶段开发验收已通过并冻结为第八阶段基线。当前已有 Python 3.12 x64 + PyInstaller 6.22.3 `--onedir` 主程序构建、统一资源定位、单实例、WebView2 Runtime 检查、滚动日志、托盘/Toast、Private/Public 网络边界及 94 项自动化回归证据。第七阶段正式无 Python/无源码干净 Windows 11 验收因测试机暂不可用而延期，必须在第八阶段最终发布验收中一并补齐。
 
@@ -851,6 +853,8 @@ Phase 8E 最终功能基线提交：`22d77ebe4e251aeeb6cd97a734ccb2978ac853e2`�
 结论：**Phase 8 development acceptance：PASS。** 后续只进入发布验证和真实缺陷修复，不主动扩展安装/卸载架构。
 
 ## 十、Phase 8F：干净 Windows 11 最终发布验收
+
+冻结候选：`0.6.0-rc2`，源码提交 `c729a4b52b5751d26b6db262a5a1be4b804dd226`，Build ID `0.6.0-c729a4b-20260926043412`。P8-R01～R04 只允许使用 `C:\Projects\LanDrop-ReleaseCandidates\0.6.0-rc2-c729a4b` 中的 RC2 产物和随目录冻结的 A 升级基线，不再使用 RC1。
 
 ### P8-R01：测试机要求
 
