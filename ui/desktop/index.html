@@ -63,7 +63,7 @@
 
           <div class="session-grid">
             <article class="qr-card">
-              <span class="metric-label">扫码连接（首选）</span>
+              <div class="metric-heading"><span class="metric-label">扫码连接</span><span class="metric-badge">首选</span></div>
               <button id="openQrDialog" class="qr-frame" type="button" aria-label="放大一次性客户机邀请二维码" disabled>
                 <img id="pairingQr" alt="一次性客户机邀请二维码" hidden>
                 <span id="qrUnavailable">启动服务后显示</span>
@@ -71,12 +71,14 @@
               <small>扫码后自动配对；点击可放大</small>
             </article>
             <article class="pairing-card">
-              <span class="metric-label">8 位配对码（备用）</span>
-              <strong id="pairing" class="code">—</strong>
+              <div class="metric-heading"><span class="metric-label">8 位配对码</span><span class="metric-badge secondary-badge">备用</span></div>
+              <button id="copyPairing" class="copy-value" type="button" aria-label="复制 8 位配对码" disabled>
+                <strong id="pairing" class="code">—</strong><span class="copy-hint">复制</span>
+              </button>
               <small>只向当前可信局域网中的客户机提供</small>
             </article>
             <article class="session-addresses">
-              <div><span>客户机访问</span><strong id="lanUrl">—</strong></div>
+              <div><span>客户机访问</span><button id="copyLanUrl" class="copy-inline" type="button" aria-label="复制客户机访问地址" disabled><strong id="lanUrl">—</strong><span class="copy-hint">复制</span></button></div>
               <div><span>监听网络</span><strong id="network">—</strong></div>
             </article>
           </div>

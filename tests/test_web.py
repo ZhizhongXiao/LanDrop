@@ -34,10 +34,13 @@ class BottleApplicationTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.temporary.cleanup()
 
-    def test_pair_download_upload_and_unpair(self) -> None:
+    def test_pair_download_and_upload(self) -> None:
         status, headers, body = wsgi_request(self.app, "/")
         self.assertTrue(status.startswith("200"))
-        self.assertIn("连接 LanDrop", body.decode())
+        pairing_page = body.decode()
+        self.assertIn("连接 LanDrop", pairing_page)
+        self.assertIn('class="pairing-form"', pairing_page)
+        self.assertIn('class="pairing-field"', pairing_page)
 
         form = urlencode({"code": f" {self.code} ", "device_name": "测试手机"}).encode()
         status, headers, _body = wsgi_request(
@@ -66,6 +69,13 @@ class BottleApplicationTests(unittest.TestCase):
         self.assertIn('type="file" name="file" multiple', decoded)
         self.assertIn('class="download-choice"', decoded)
         self.assertIn('id="downloadSelected"', decoded)
+        self.assertIn('id="showDownloads"', decoded)
+        self.assertIn('id="showUploads"', decoded)
+        self.assertIn('id="downloadPanel"', decoded)
+        self.assertIn('id="uploadPanel"', decoded)
+        self.assertIn("setTransferMode", decoded)
+        self.assertNotIn("取消信任此浏览器", decoded)
+        self.assertNotIn('action="/unpair"', decoded)
         self.assertIn("runUploadQueue", decoded)
         self.assertNotIn("new Blob", decoded)
 
@@ -128,17 +138,16 @@ class BottleApplicationTests(unittest.TestCase):
         self.assertEqual((self.received / "流式 文件.txt").read_bytes(), b"raw-data")
         self.assertEqual(self.lifecycle.snapshot().statistics["uploaded_mb"], 0.000016)
 
-        unpair_form = urlencode({"csrf": csrf}).encode()
         status, _headers, _body = wsgi_request(
             self.app,
             "/unpair",
             method="POST",
-            body=unpair_form,
+            body=urlencode({"csrf": csrf}).encode(),
             content_type="application/x-www-form-urlencoded",
             cookie=cookie,
         )
-        self.assertTrue(status.startswith("303"), status)
-        self.assertEqual(self.store.list_clients(), [])
+        self.assertTrue(status.startswith("404"), status)
+        self.assertEqual(len(self.store.list_clients()), 1)
 
     def test_upload_requires_authentication(self) -> None:
         status, _headers, _body = wsgi_request(self.app, "/upload", method="POST")

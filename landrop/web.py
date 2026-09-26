@@ -182,13 +182,19 @@ def create_application(config: WebConfig) -> tuple[Any, str]:
         body = f"""
         <header><div><h1>LanDrop</h1><p>可信客户机浏览器：{html.escape(client.label)}</p></div></header>
         <main>
-          <section>
+          <nav class="transfer-tabs" aria-label="选择传输方向">
+            <button id="showDownloads" class="transfer-tab active" type="button" aria-controls="downloadPanel" aria-selected="true">↓ 下载文件</button>
+            <button id="showUploads" class="transfer-tab" type="button" aria-controls="uploadPanel" aria-selected="false">↑ 上传文件</button>
+          </nav>
+          <section id="downloadPanel" class="transfer-panel download-panel">
+            <p class="panel-kicker">FROM SERVER</p>
             <h2>从服务机下载</h2>
             <ul class="files">{listing}</ul>
             <p id="downloadStatus" class="transfer-status" aria-live="polite">选择文件名可直接下载，也可勾选多个文件。</p>
             <iframe name="downloadTarget" title="下载目标" hidden></iframe>
           </section>
-          <section>
+          <section id="uploadPanel" class="transfer-panel upload-panel" hidden>
+            <p class="panel-kicker">TO SERVER</p>
             <h2>上传到服务机</h2>
             <p>单个文件上限：{html.escape(format_size(config.max_upload_bytes))}</p>
             <form id="uploadForm" action="/upload" method="post" enctype="multipart/form-data">
@@ -204,12 +210,6 @@ def create_application(config: WebConfig) -> tuple[Any, str]:
               <ul id="uploadResults" class="batch-results"></ul>
             </div>
           </section>
-          <section class="quiet">
-            <form action="/unpair" method="post">
-              <input type="hidden" name="csrf" value="{csrf_token}">
-              <button type="submit" class="secondary">取消信任此浏览器</button>
-            </form>
-          </section>
         </main>
         <div class="bulk-bar" role="group" aria-label="批量下载">
           <span id="downloadSelection">尚未选择文件</span>
@@ -217,6 +217,10 @@ def create_application(config: WebConfig) -> tuple[Any, str]:
         </div>
         <script>
           const downloadStatus = document.getElementById('downloadStatus');
+          const downloadPanel = document.getElementById('downloadPanel');
+          const uploadPanel = document.getElementById('uploadPanel');
+          const showDownloads = document.getElementById('showDownloads');
+          const showUploads = document.getElementById('showUploads');
           const downloadChoices = [...document.querySelectorAll('.download-choice')];
           const downloadSelected = document.getElementById('downloadSelected');
           const downloadSelection = document.getElementById('downloadSelection');
@@ -233,6 +237,18 @@ def create_application(config: WebConfig) -> tuple[Any, str]:
           let currentUpload = null;
           let stopUploadQueue = false;
           let failedUploads = [];
+
+          function setTransferMode(mode) {{
+            const downloading = mode === 'download';
+            downloadPanel.hidden = !downloading;
+            uploadPanel.hidden = downloading;
+            downloadSelected.closest('.bulk-bar').hidden = !downloading;
+            showDownloads.classList.toggle('active', downloading);
+            showUploads.classList.toggle('active', !downloading);
+            showDownloads.setAttribute('aria-selected', String(downloading));
+            showUploads.setAttribute('aria-selected', String(!downloading));
+            document.body.dataset.transferMode = mode;
+          }}
 
           function uploadMegabytes(bytes) {{
             return (bytes / 1000000).toFixed(2);
@@ -288,6 +304,8 @@ def create_application(config: WebConfig) -> tuple[Any, str]:
               }}
             }});
           }}
+          showDownloads.addEventListener('click', () => setTransferMode('download'));
+          showUploads.addEventListener('click', () => setTransferMode('upload'));
           for (const choice of downloadChoices) choice.addEventListener('change', updateDownloadSelection);
           downloadSelected.addEventListener('click', async () => {{
             const selected = downloadChoices.filter(item => item.checked);
@@ -396,6 +414,7 @@ def create_application(config: WebConfig) -> tuple[Any, str]:
             if (currentUpload) currentUpload.abort();
           }});
           uploadRetry.addEventListener('click', () => runUploadQueue([...failedUploads]));
+          setTransferMode('download');
         </script>
         """
         return _page("LanDrop", body)
@@ -843,22 +862,6 @@ def create_application(config: WebConfig) -> tuple[Any, str]:
         )
         return _html_response(_page("上传成功", message), 201)
 
-    @app.post("/unpair")
-    def unpair() -> HTTPResponse:
-        expired = expired_response()
-        if expired is not None:
-            return expired
-        client = require_client()
-        if isinstance(client, HTTPResponse):
-            return client
-        if request.content_length < 0 or request.content_length > SMALL_FORM_LIMIT:
-            return _html_response(_error_page(413, "请求大小无效。"), 413)
-        if not _valid_csrf(csrf_token):
-            return _html_response(_error_page(403, "请求校验失败。"), 403)
-        config.credentials.revoke(client.client_id)
-        response.delete_cookie(COOKIE_NAME, path="/")
-        return redirect("/", code=303)
-
     @app.error(404)
     def not_found(_error: object) -> HTTPResponse:
         return _html_response(_error_page(404, "请求页面或文件不存在。"), 404)
@@ -916,14 +919,14 @@ def _pairing_page() -> str:
     <main class="narrow">
       <h1>连接 LanDrop</h1>
       <p>请在服务机的 LanDrop 窗口或控制台中查看当前 8 位配对码。配对成功后该码会立即更新。</p>
-      <form action="/pair" method="post">
-        <label>配对码 <input id="pairingCode" name="code" inputmode="numeric"
+      <form class="pairing-form" action="/pair" method="post">
+        <label class="pairing-field" for="pairingCode"><span>配对码</span><input id="pairingCode" name="code" inputmode="numeric"
           autocomplete="one-time-code" pattern="[0-9]{8}" required></label>
-        <label>设备名称（可选）
+        <label class="pairing-field"><span>设备名称（可选）</span>
           <input name="device_name" maxlength="40" autocomplete="off"
             placeholder="例如：XXX 的 iPhone 16">
         </label>
-        <button type="submit">配对</button>
+        <div class="pairing-actions"><button type="submit">配对</button></div>
       </form>
     </main>
     <script>
@@ -1061,8 +1064,9 @@ def _page(title: str, body: str) -> str:
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{html.escape(title)}</title>
   <style>
-    :root {{ color-scheme: light dark; font-family: system-ui, sans-serif; }}
-    body {{ margin: 0; padding-bottom: 88px; background: #f5f7fb; color: #182230; }}
+    :root {{ color-scheme: light dark; font-family: "Source Han Sans SC", "Noto Sans CJK SC", "Microsoft YaHei UI", system-ui, sans-serif; }}
+    body {{ margin: 0; padding-bottom: 88px; background: linear-gradient(150deg, #edf4fc, #f8fafc 58%, #eef7f6); color: #182230; font-size: 16px; line-height: 1.5; }}
+    body[data-transfer-mode="upload"] {{ padding-bottom: 24px; }}
     header, main {{ width: min(760px, calc(100% - 32px)); margin: 24px auto; }}
     main {{ display: grid; gap: 18px; }}
     section, .narrow {{ background: white; border-radius: 14px; padding: 20px; box-shadow: 0 5px 20px #18223012; }}
@@ -1072,6 +1076,17 @@ def _page(title: str, body: str) -> str:
     button {{ border: 0; border-radius: 8px; background: #1264d8; color: white; cursor: pointer; }}
     button.secondary {{ background: #596579; }}
     button:disabled, input:disabled {{ opacity: .6; cursor: wait; }}
+    [hidden] {{ display: none !important; }}
+    .transfer-tabs {{ display: grid; grid-template-columns: 1fr 1fr; gap: 8px; padding: 6px; border: 1px solid #d7e2ef; border-radius: 14px; background: #e7eef7; }}
+    .transfer-tab {{ min-height: 48px; background: transparent; color: #475467; font-weight: 700; }}
+    .transfer-tab.active {{ background: #fff; color: #075ea8; box-shadow: 0 4px 14px #18223016; }}
+    .transfer-panel {{ position: relative; overflow: hidden; border: 1px solid transparent; }}
+    .download-panel {{ border-color: #bfdbf3; }}
+    .upload-panel {{ border-color: #bfe4db; }}
+    .download-panel::before, .upload-panel::before {{ position: absolute; inset: 0 auto 0 0; width: 5px; content: ""; }}
+    .download-panel::before {{ background: #1286d9; }}
+    .upload-panel::before {{ background: #15966f; }}
+    .panel-kicker {{ margin: 0 0 6px; color: #667085; font-size: 12px; font-weight: 750; letter-spacing: .12em; }}
     .upload-progress {{ width: 100%; margin-top: 12px; }}
     .upload-progress progress {{ width: 100%; height: 16px; }}
     .upload-progress p {{ margin: 6px 0 0; overflow-wrap: anywhere; }}
@@ -1087,20 +1102,36 @@ def _page(title: str, body: str) -> str:
     .transfer-status {{ min-height: 24px; margin-bottom: 0; color: #475467; overflow-wrap: anywhere; }}
     .bulk-bar {{ position: fixed; z-index: 10; left: 50%; bottom: 12px; transform: translateX(-50%); display: flex; align-items: center; justify-content: space-between; gap: 12px; width: min(728px, calc(100% - 32px)); padding: 12px 14px; border: 1px solid #d7deea; border-radius: 14px; background: #fff; box-shadow: 0 8px 28px #1822302b; }}
     .bulk-bar span {{ color: #475467; font-size: 14px; }}
-    .quiet {{ box-shadow: none; background: transparent; padding: 0; }}
+    .pairing-form {{ display: grid; gap: 12px; align-items: center; }}
+    .pairing-field {{ display: grid; grid-template-columns: 126px minmax(0, 1fr); align-items: center; gap: 12px; margin: 0; }}
+    .pairing-field > span {{ color: #344054; font-weight: 650; }}
+    .pairing-field input {{ width: 100%; min-width: 0; box-sizing: border-box; }}
+    .pairing-actions {{ display: flex; justify-content: flex-end; }}
+    .pairing-actions button {{ min-width: 112px; }}
     @media (max-width: 560px) {{
       header, main {{ width: min(100% - 20px, 760px); margin: 14px auto; }}
       section, .narrow {{ padding: 16px; border-radius: 12px; }}
       form {{ align-items: stretch; }}
       form input[type="file"] {{ width: 100%; }}
       form button {{ flex: 1; min-height: 44px; }}
+      .transfer-tabs {{ position: sticky; top: 8px; z-index: 9; }}
+      .transfer-tab {{ padding: 10px 8px; }}
+      .pairing-field {{ grid-template-columns: 108px minmax(0, 1fr); gap: 10px; }}
+      .pairing-field > span {{ line-height: 1.3; }}
+      .pairing-actions {{ padding-left: 118px; }}
       .file-size {{ max-width: 88px; text-align: right; }}
       .bulk-bar {{ width: calc(100% - 20px); bottom: 8px; }}
     }}
     @media (prefers-color-scheme: dark) {{
-      body {{ background: #111722; color: #edf3fa; }}
+      body {{ background: linear-gradient(150deg, #111b27, #182433 58%, #132a2a); color: #edf3fa; }}
       section, .narrow, .bulk-bar {{ background: #1b2431; }}
       .bulk-bar {{ border-color: #344054; }}
+      .transfer-tabs {{ border-color: #344054; background: #131d29; }}
+      .transfer-tab {{ color: #b7c0cf; }}
+      .transfer-tab.active {{ background: #263447; color: #76c7ff; box-shadow: none; }}
+      .download-panel {{ border-color: #285a7d; }}
+      .upload-panel {{ border-color: #286a5a; }}
+      .panel-kicker, .pairing-field > span {{ color: #b7c0cf; }}
       .file-size, .transfer-status, .bulk-bar span {{ color: #b7c0cf; }}
     }}
   </style>

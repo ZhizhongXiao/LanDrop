@@ -10,6 +10,7 @@ body {
   margin: 0;
   overflow: hidden;
   color: var(--text);
+  font-size: 14px;
   background:
     radial-gradient(circle at 8% 0%, var(--accent-soft), transparent 35%),
     var(--page);
@@ -65,14 +66,14 @@ input {
 
 .wizard-brand-copy strong {
   display: block;
-  font-size: 18px;
+  font-size: 20px;
 }
 
 .wizard-brand-copy span {
   display: block;
   margin-top: 2px;
   color: rgba(255, 255, 255, .68);
-  font-size: 12px;
+  font-size: 13px;
 }
 
 .wizard-brand .theme-indicator {
@@ -117,11 +118,11 @@ input {
   place-items: center;
   border: 1px solid rgba(255, 255, 255, .28);
   border-radius: 50%;
-  font-size: 12px;
+  font-size: 13px;
 }
 
 .wizard-step span {
-  font-size: 13px;
+  font-size: 14px;
   font-weight: 600;
 }
 
@@ -148,7 +149,7 @@ input {
   bottom: 22px;
   left: 22px;
   color: rgba(255, 255, 255, .65);
-  font-size: 12px;
+  font-size: 13px;
   line-height: 1.55;
 }
 
@@ -177,7 +178,7 @@ input {
 .wizard-kicker {
   margin: 0 0 10px;
   color: var(--accent-strong);
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 800;
   letter-spacing: .12em;
 }
@@ -234,7 +235,7 @@ input {
 .summary-row span {
   margin-top: 4px;
   color: var(--text-secondary);
-  font-size: 12px;
+  font-size: 13px;
   line-height: 1.55;
 }
 
@@ -267,7 +268,7 @@ input {
   border-left: 3px solid var(--accent-strong);
   color: var(--text-secondary);
   background: var(--accent-soft);
-  font-size: 12px;
+  font-size: 13px;
   line-height: 1.55;
 }
 
@@ -320,7 +321,7 @@ input {
 
 .wizard-version {
   color: var(--muted);
-  font-size: 12px;
+  font-size: 13px;
 }
 
 @keyframes wizard-in {

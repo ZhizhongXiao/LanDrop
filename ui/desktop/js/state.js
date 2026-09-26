@@ -81,7 +81,9 @@ function render(state) {
   document.body.dataset.serviceState = state.phase || (running ? "running" : "stopped");
 
   $("message").textContent = state.message || "—";
-  $("lanUrl").textContent = state.lan_url || "—";
+  const lanUrl = state.lan_url || "—";
+  $("lanUrl").textContent = lanUrl;
+  $("copyLanUrl").disabled = !running || lanUrl === "—";
   const networkName = state.network_name && state.network_name !== state.interface
     ? ` · ${state.network_name}` : "";
   $("network").textContent = state.interface
@@ -92,7 +94,9 @@ function render(state) {
     : "尚未选择";
   $("settingsPreviewShared").textContent = state.shared_directory || "尚未设置";
   $("settingsPreviewReceived").textContent = state.receive_directory || "尚未设置";
-  $("pairing").textContent = String(state.pairing_code || "").replace(/[^0-9]/g, "") || "—";
+  const pairingCode = String(state.pairing_code || "").replace(/[^0-9]/g, "") || "—";
+  $("pairing").textContent = pairingCode;
+  $("copyPairing").disabled = !running || pairingCode === "—";
   const pairingQr = $("pairingQr");
   const pairingQrLarge = $("pairingQrLarge");
   const qrDialog = $("qrDialog");

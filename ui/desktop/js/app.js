@@ -105,19 +105,14 @@ window.addEventListener("popstate", event => {
   if (pageId === "trustedClientsPage") refreshClients();
 });
 
-async function copyDiagnosticReport() {
-  const result = await window.pywebview.api.get_diagnostic_report();
-  if (!result.ok) {
-    $("settingsNotice").textContent = result.error;
-    return;
-  }
+async function writeClipboard(text) {
   let copied = false;
   try {
-    await navigator.clipboard.writeText(result.text);
+    await navigator.clipboard.writeText(text);
     copied = true;
   } catch (_error) {
     const area = document.createElement("textarea");
-    area.value = result.text;
+    area.value = text;
     area.style.position = "fixed";
     area.style.opacity = "0";
     document.body.appendChild(area);
@@ -125,6 +120,24 @@ async function copyDiagnosticReport() {
     copied = document.execCommand("copy");
     area.remove();
   }
+  return copied;
+}
+
+async function copySessionValue(elementId, successMessage) {
+  const value = $(elementId).textContent.trim();
+  if (!value || value === "—") return;
+  const copied = await writeClipboard(value);
+  if (copied) showInfo(successMessage);
+  else showError("无法写入剪贴板，请稍后重试。");
+}
+
+async function copyDiagnosticReport() {
+  const result = await window.pywebview.api.get_diagnostic_report();
+  if (!result.ok) {
+    $("settingsNotice").textContent = result.error;
+    return;
+  }
+  const copied = await writeClipboard(result.text);
   $("settingsNotice").textContent = copied
     ? "诊断信息已复制；不包含配对码、凭据或收发目录。"
     : "无法写入剪贴板，请稍后重试。";
@@ -197,6 +210,9 @@ $("openQrDialog").addEventListener("click", () => {
   if (!$("pairingQrLarge").getAttribute("src")) return;
   $("qrDialog").showModal();
 });
+
+$("copyPairing").addEventListener("click", () => copySessionValue("pairing", "配对码已复制。"));
+$("copyLanUrl").addEventListener("click", () => copySessionValue("lanUrl", "客户机访问地址已复制。"));
 
 $("qrDialog").addEventListener("click", event => {
   if (event.target === $("qrDialog")) $("qrDialog").close();
