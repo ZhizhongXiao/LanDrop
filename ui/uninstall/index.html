@@ -5,7 +5,6 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light dark">
   <title>卸载 LanDrop</title>
-  <script src="js/mode.js"></script>
   <link rel="stylesheet" href="../desktop/css/tokens.css">
   <link rel="stylesheet" href="../wizard/css/wizard.css">
   <link rel="stylesheet" href="css/uninstall.css">
@@ -14,13 +13,10 @@
   <main class="wizard-shell">
     <aside class="wizard-rail">
       <button class="wizard-brand" type="button" data-theme-toggle aria-label="主题：跟随系统；点击切换为深色模式"><span class="wizard-brand-icon"><img src="../../assets/LanDrop-icon-preview.png" alt=""><span class="theme-indicator" data-theme-indicator aria-hidden="true">◐</span></span><span class="wizard-brand-copy"><strong>LanDrop</strong><span>卸载向导</span></span></button>
-      <ol class="wizard-steps normal-steps">
+      <ol class="wizard-steps">
         <li class="wizard-step active"><b>1</b><span>卸载说明</span></li>
         <li class="wizard-step"><b>2</b><span>保留数据</span></li>
         <li class="wizard-step"><b>3</b><span>确认卸载</span></li>
-      </ol>
-      <ol class="wizard-steps temporary-steps" aria-label="卸载执行阶段">
-        <li class="wizard-step active"><b>4</b><span>执行清理</span></li>
       </ol>
       <p class="rail-note">卸载前后状态保持一致且可解释；用户数据只有在明确选择后才会删除。</p>
     </aside>
@@ -49,11 +45,6 @@
             <div class="summary-row"><strong>收发文件</strong><span>始终保留</span></div>
           </div>
           <div id="previewResult" class="preview-note" aria-live="polite">尚未执行卸载。</div>
-        </section>
-        <section id="executionPanel" class="execution-panel" hidden>
-          <p class="wizard-kicker">UNINSTALLING</p><h1 id="executionTitle">正在卸载 LanDrop</h1>
-          <p id="executionMessage" class="wizard-lead">正在验证卸载请求和当前安装状态…</p>
-          <div id="executionResiduals" class="preview-note" hidden></div>
         </section>
       </div>
       <footer class="wizard-footer"><span id="uninstallVersion" class="wizard-version">LanDrop Uninstall</span><div class="footer-actions"><button id="back" class="wizard-button" type="button">返回</button><button id="next" class="wizard-button primary" type="button">继续</button></div></footer>

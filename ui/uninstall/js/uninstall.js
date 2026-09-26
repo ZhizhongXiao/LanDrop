@@ -4,7 +4,6 @@ const result = document.getElementById("previewResult");
 const deleteConfig = document.getElementById("deleteConfig");
 const deleteLogs = document.getElementById("deleteLogs");
 const deleteTrusted = document.getElementById("deleteTrusted");
-let executionPoll = null;
 
 function setResult(message, failed = false) {
   result.textContent = message;
@@ -36,51 +35,6 @@ const wizard = createWizard({
   }
 });
 
-async function pollExecution() {
-  const status = await window.pywebview.api.get_uninstall_status();
-  if (status.phase !== "finished") {
-    executionPoll = window.setTimeout(pollExecution, 250);
-    return;
-  }
-  const outcome = status.outcome || {};
-  document.getElementById("executionTitle").textContent = outcome.finalization_pending
-    ? "等待最终清理"
-    : (outcome.complete ? "卸载完成" : "卸载未完全完成");
-  document.getElementById("executionMessage").textContent = outcome.message || "卸载流程已结束。";
-  const residuals = outcome.residuals || [];
-  const residualPanel = document.getElementById("executionResiduals");
-  if (residuals.length) {
-    residualPanel.hidden = false;
-    residualPanel.classList.add("error");
-    residualPanel.textContent = `残留：${residuals.join("；")}`;
-  }
-  const next = document.getElementById("next");
-  next.disabled = false;
-  next.textContent = outcome.finalization_pending ? "关闭并完成清理" : "关闭";
-  next.onclick = async event => {
-    event.stopImmediatePropagation();
-    await window.pywebview.api.close_window();
-  };
-}
-
-function enterTemporaryMode() {
-  document.documentElement.classList.add("uninstall-temporary");
-  document.querySelectorAll(".wizard-page").forEach(page => page.classList.remove("active"));
-  document.querySelectorAll(".temporary-steps .wizard-step").forEach(step => {
-    step.classList.add("active");
-    step.classList.remove("done");
-  });
-  document.getElementById("executionPanel").hidden = false;
-  document.getElementById("back").hidden = true;
-  const next = document.getElementById("next");
-  next.disabled = true;
-  next.textContent = "正在卸载…";
-}
-
-if (document.documentElement.classList.contains("uninstall-temporary")) {
-  enterTemporaryMode();
-}
-
 window.addEventListener("pywebviewready", async () => {
   const context = await window.pywebview.api.get_context();
   if (!context.ok) {
@@ -90,14 +44,8 @@ window.addEventListener("pywebviewready", async () => {
   document.getElementById("uninstallVersion").textContent = context.version
     ? `LanDrop ${context.version} · Uninstall`
     : "LanDrop Uninstall";
-  if (context.mode === "temporary") {
-    enterTemporaryMode();
-    const started = await window.pywebview.api.start_execution();
-    if (!started.ok) {
-      document.getElementById("executionMessage").textContent = started.error || "无法开始卸载。";
-      return;
-    }
-    await pollExecution();
+  if (context.mode !== "installed") {
+    setResult("卸载界面模式不匹配，请从 Windows 卸载入口重新启动。", true);
     return;
   }
   document.getElementById("uninstallIntro").textContent =

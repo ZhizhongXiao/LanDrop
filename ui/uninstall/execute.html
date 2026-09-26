@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>清理 LanDrop</title>
+  <link rel="stylesheet" href="../desktop/css/tokens.css">
+  <link rel="stylesheet" href="../wizard/css/wizard.css">
+  <link rel="stylesheet" href="css/uninstall.css">
+</head>
+<body>
+  <main class="wizard-shell">
+    <aside class="wizard-rail">
+      <button class="wizard-brand" type="button" data-theme-toggle aria-label="主题：跟随系统；点击切换为深色模式"><span class="wizard-brand-icon"><img src="../../assets/LanDrop-icon-preview.png" alt=""><span class="theme-indicator" data-theme-indicator aria-hidden="true">◐</span></span><span class="wizard-brand-copy"><strong>LanDrop</strong><span>卸载向导</span></span></button>
+      <ol class="wizard-steps" aria-label="卸载执行阶段">
+        <li class="wizard-step active"><b>4</b><span>执行清理</span></li>
+      </ol>
+      <p class="rail-note">正在按已确认的范围清理程序和应用数据；收发文件始终保留。</p>
+    </aside>
+    <section class="wizard-main">
+      <div class="wizard-content">
+        <section class="execution-panel">
+          <p class="wizard-kicker">UNINSTALLING</p><h1 id="executionTitle">正在卸载 LanDrop</h1>
+          <p id="executionMessage" class="wizard-lead">正在验证卸载请求和当前安装状态…</p>
+          <div id="executionResiduals" class="preview-note" hidden></div>
+        </section>
+      </div>
+      <footer class="wizard-footer"><span id="uninstallVersion" class="wizard-version">LanDrop Uninstall</span><div class="footer-actions"><button id="next" class="wizard-button primary" type="button" disabled>正在卸载…</button></div></footer>
+    </section>
+  </main>
+  <script src="../shared/js/theme.js"></script>
+  <script src="js/execution.js"></script>
+</body>
+</html>

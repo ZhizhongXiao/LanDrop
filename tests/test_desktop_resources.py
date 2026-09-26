@@ -88,9 +88,10 @@ class DesktopResourceTests(unittest.TestCase):
             PROJECT_ROOT / "ui" / "wizard" / "css" / "wizard.css",
             PROJECT_ROOT / "ui" / "wizard" / "js" / "wizard.js",
             PROJECT_ROOT / "ui" / "setup" / "js" / "setup.js",
-            PROJECT_ROOT / "ui" / "uninstall" / "js" / "mode.js",
             PROJECT_ROOT / "ui" / "uninstall" / "js" / "uninstall.js",
+            PROJECT_ROOT / "ui" / "uninstall" / "js" / "execution.js",
             PROJECT_ROOT / "ui" / "uninstall" / "css" / "uninstall.css",
+            PROJECT_ROOT / "ui" / "uninstall" / "execute.html",
         )
         self.assertTrue(all(path.is_file() for path in expected))
         for page_name in ("setup", "uninstall"):
@@ -102,19 +103,14 @@ class DesktopResourceTests(unittest.TestCase):
             self.assertNotRegex(html, r"(?is)<style(?:\s|>)")
             self.assertNotRegex(html, r"(?is)<script(?![^>]+\bsrc=)[^>]*>")
 
-        uninstall_html = (PROJECT_ROOT / "ui" / "uninstall" / "index.html").read_text(
+        execution_html = (PROJECT_ROOT / "ui" / "uninstall" / "execute.html").read_text(
             encoding="utf-8"
         )
-        self.assertLess(
-            uninstall_html.index('src="js/mode.js"'),
-            uninstall_html.index('<link rel="stylesheet"'),
-        )
-        self.assertIn('<b>4</b><span>执行清理</span>', uninstall_html)
-        uninstall_css = (
-            PROJECT_ROOT / "ui" / "uninstall" / "css" / "uninstall.css"
-        ).read_text(encoding="utf-8")
-        self.assertIn(".uninstall-temporary .normal-steps", uninstall_css)
-        self.assertIn(".uninstall-temporary .temporary-steps", uninstall_css)
+        self.assertIn("../wizard/css/wizard.css", execution_html)
+        self.assertIn('<b>4</b><span>执行清理</span>', execution_html)
+        self.assertNotIn('<b>1</b><span>卸载说明</span>', execution_html)
+        self.assertNotRegex(execution_html, r"(?is)<style(?:\s|>)")
+        self.assertNotRegex(execution_html, r"(?is)<script(?![^>]+\bsrc=)[^>]*>")
 
     def test_wizard_fills_a_compact_native_window(self) -> None:
         stylesheet = (PROJECT_ROOT / "ui" / "wizard" / "css" / "wizard.css").read_text(

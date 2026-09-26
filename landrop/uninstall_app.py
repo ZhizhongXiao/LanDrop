@@ -46,6 +46,7 @@ class UninstallApi:
         self._guard = threading.Lock()
         self._state_lock = threading.Lock()
         self._operation: dict[str, object] | None = None
+        self._temp_cleanup_scheduled = False
 
     @property
     def temporary_mode(self) -> bool:
@@ -105,10 +106,7 @@ class UninstallApi:
                 expected_request_sha256=self.expected_request_sha256,
             )
             try:
-                schedule_temp_self_cleanup(
-                    self.current_executable.parent,
-                    self.service.paths,
-                )
+                self.ensure_temp_cleanup_scheduled()
                 if outcome.complete:
                     outcome = UninstallOutcome(
                         complete=False,
@@ -147,6 +145,18 @@ class UninstallApi:
                 "outcome": outcome.to_dict(),
             }
         self._guard.release()
+
+    def ensure_temp_cleanup_scheduled(self) -> None:
+        if not self.temporary_mode:
+            return
+        with self._state_lock:
+            if self._temp_cleanup_scheduled:
+                return
+            schedule_temp_self_cleanup(
+                self.current_executable.parent,
+                self.service.paths,
+            )
+            self._temp_cleanup_scheduled = True
 
     def get_uninstall_status(self) -> dict[str, object]:
         with self._state_lock:
@@ -246,19 +256,28 @@ def main(argv: list[str] | None = None) -> int:
     window.events.closing += lambda: bool(
         api.get_uninstall_status().get("phase") != "running"
     )
+    exit_code = 0
     try:
         webview.start(gui="edgechromium", debug=False, private_mode=True)
-        return 0
     except Exception as exc:
         _show_native_error(f"LanDrop Uninstall 无法继续：{exc}")
-        return 4
+        exit_code = 4
+    finally:
+        if temporary_mode:
+            try:
+                api.ensure_temp_cleanup_scheduled()
+            except Exception as exc:
+                _show_native_error(f"临时卸载文件无法安排清理：{exc}")
+                exit_code = 4
+    return exit_code
 
 
 def _required_resources() -> tuple[Path, ...]:
     return (
         resource_path("ui/uninstall/index.html"),
-        resource_path("ui/uninstall/js/mode.js"),
+        resource_path("ui/uninstall/execute.html"),
         resource_path("ui/uninstall/js/uninstall.js"),
+        resource_path("ui/uninstall/js/execution.js"),
         resource_path("ui/uninstall/css/uninstall.css"),
         resource_path("ui/wizard/js/wizard.js"),
         resource_path("ui/wizard/css/wizard.css"),
@@ -267,8 +286,8 @@ def _required_resources() -> tuple[Path, ...]:
 
 
 def _uninstall_ui_url(*, temporary_mode: bool) -> str:
-    url = resource_path("ui/uninstall/index.html").as_uri()
-    return f"{url}?mode=temporary" if temporary_mode else url
+    page = "ui/uninstall/execute.html" if temporary_mode else "ui/uninstall/index.html"
+    return resource_path(page).as_uri()
 
 
 def _show_native_error(message: str) -> None:
