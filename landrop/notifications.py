@@ -47,14 +47,14 @@ class WindowsToastBackend:
         from windows_toasts import Toast, ToastButton
 
         toast = Toast(
-            ["LanDrop 即将关闭服务", "剩余约 60 秒；可重置倒计时或立即停止服务。"],
+            ["LanDrop 即将关闭服务", "剩余约 60 秒；可打开窗口、重置计时或关闭服务。"],
             group=TOAST_GROUP,
             expiration_time=datetime.now(timezone.utc) + timedelta(minutes=2),
         )
         toast.tag = f"{session_id[:24]}-{deadline_revision}"
-        toast.AddAction(ToastButton("重置为 5 分钟", "reset"))
-        toast.AddAction(ToastButton("立即关闭", "stop"))
         toast.AddAction(ToastButton("打开窗口", "open_window"))
+        toast.AddAction(ToastButton("重置计时", "reset"))
+        toast.AddAction(ToastButton("关闭服务", "stop"))
         toast.on_activated = lambda event: self._handler(
             str(event.arguments), session_id, deadline_revision
         )

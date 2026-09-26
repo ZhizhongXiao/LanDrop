@@ -177,6 +177,24 @@ class DesktopResourceTests(unittest.TestCase):
         self.assertIn('copySessionValue("lanUrl"', app_script)
         self.assertNotIn("open_transfer_page", app_script)
 
+        components = (DESKTOP_ROOT / "css" / "components.css").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn(".copy-value:not(:disabled) .code", components)
+        self.assertIn(".copy-inline:not(:disabled) strong", components)
+        self.assertIn("text-decoration-color: var(--accent-strong)", components)
+
+        notifications = (
+            PROJECT_ROOT / "landrop" / "notifications.py"
+        ).read_text(encoding="utf-8")
+        open_button = 'ToastButton("打开窗口", "open_window")'
+        reset_button = 'ToastButton("重置计时", "reset")'
+        stop_button = 'ToastButton("关闭服务", "stop")'
+        self.assertLess(notifications.index(open_button), notifications.index(reset_button))
+        self.assertLess(notifications.index(reset_button), notifications.index(stop_button))
+        self.assertNotIn('ToastButton("重置为 5 分钟"', notifications)
+        self.assertNotIn('ToastButton("立即关闭"', notifications)
+
         gui_source = Path(gui.__file__).read_text(encoding="utf-8")
         self.assertIn("width=1180", gui_source)
         self.assertIn("height=840", gui_source)

@@ -55,6 +55,7 @@ class InsufficientSpaceError(StorageError):
 class ListedFile:
     relative_path: str
     size: int
+    modified_at: float
 
 
 @dataclass(frozen=True, slots=True)
@@ -203,7 +204,8 @@ def list_shared_files(shared_directory: Path) -> list[ListedFile]:
             if not resolved.is_relative_to(root) or not resolved.is_file():
                 continue
             relative = candidate.relative_to(root).as_posix()
-            files.append(ListedFile(relative, resolved.stat().st_size))
+            metadata = resolved.stat()
+            files.append(ListedFile(relative, metadata.st_size, metadata.st_mtime))
         except (OSError, ValueError):
             continue
     return sorted(files, key=lambda item: item.relative_path.casefold())

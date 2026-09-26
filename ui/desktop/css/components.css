@@ -172,6 +172,13 @@
 .copy-inline { justify-content: space-between; gap: 10px; margin-top: 4px; padding: 6px 8px; border: 1px solid transparent; border-radius: 8px; text-align: left; }
 .copy-inline strong { min-width: 0; overflow-wrap: anywhere; color: var(--text-secondary); font-size: 13px; }
 .copy-hint { flex: none; color: var(--accent-strong) !important; font-size: 11px !important; font-weight: 700; }
+.copy-value:not(:disabled) .code,
+.copy-inline:not(:disabled) strong {
+  text-decoration-line: underline;
+  text-decoration-color: var(--accent-strong);
+  text-decoration-thickness: 1px;
+  text-underline-offset: 3px;
+}
 .copy-value:hover:not(:disabled), .copy-inline:hover:not(:disabled) { border-color: var(--accent); background: var(--surface-soft); }
 .copy-value:focus-visible, .copy-inline:focus-visible { box-shadow: 0 0 0 3px var(--line-soft); }
 .copy-value:disabled, .copy-inline:disabled { cursor: default; opacity: .72; }

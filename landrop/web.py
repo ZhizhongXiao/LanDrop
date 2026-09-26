@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 import html
 import json
 from pathlib import Path
@@ -166,15 +167,22 @@ def create_application(config: WebConfig) -> tuple[Any, str]:
         for item in list_shared_files(config.shared_directory):
             url = "/prepare-download/" + quote(item.relative_path, safe="/")
             ticket_url = "/start-download/" + quote(item.relative_path, safe="/")
+            escaped_name = html.escape(item.relative_path)
             rows.append(
-                "<li class=\"file-row\"><label class=\"file-choice\">"
-                "<input class=\"download-choice\" type=\"checkbox\" data-ticket-url=\"{}\">"
+                "<li class=\"file-row file-grid\">"
+                "<input class=\"download-choice\" type=\"checkbox\" data-ticket-url=\"{}\" "
+                "aria-label=\"选择 {}\">"
                 "<a class=\"file-link\" href=\"{}\" data-ticket-url=\"{}\">{}</a>"
-                "</label><span class=\"file-size\">{}</span></li>".format(
+                "<span class=\"file-modified\">{}</span>"
+                "<span class=\"file-type\">{}</span>"
+                "<span class=\"file-size\">{}</span></li>".format(
                     html.escape(ticket_url, quote=True),
+                    escaped_name,
                     html.escape(url, quote=True),
                     html.escape(ticket_url, quote=True),
-                    html.escape(item.relative_path),
+                    escaped_name,
+                    html.escape(_format_modified_time(item.modified_at)),
+                    html.escape(_file_type_label(item.relative_path)),
                     html.escape(format_size(item.size)),
                 )
             )
@@ -189,7 +197,16 @@ def create_application(config: WebConfig) -> tuple[Any, str]:
           <section id="downloadPanel" class="transfer-panel download-panel">
             <p class="panel-kicker">FROM SERVER</p>
             <h2>从服务机下载</h2>
-            <ul class="files">{listing}</ul>
+            <div class="file-table">
+              <div class="file-header file-grid" role="row">
+                <input id="selectAllDownloads" type="checkbox" aria-label="选择全部文件">
+                <span>名称</span>
+                <span class="file-modified">修改日期</span>
+                <span class="file-type">类型</span>
+                <span class="file-size">大小</span>
+              </div>
+              <ul class="files">{listing}</ul>
+            </div>
             <p id="downloadStatus" class="transfer-status" aria-live="polite">选择文件名可直接下载，也可勾选多个文件。</p>
             <iframe name="downloadTarget" title="下载目标" hidden></iframe>
           </section>
@@ -222,6 +239,7 @@ def create_application(config: WebConfig) -> tuple[Any, str]:
           const showDownloads = document.getElementById('showDownloads');
           const showUploads = document.getElementById('showUploads');
           const downloadChoices = [...document.querySelectorAll('.download-choice')];
+          const selectAllDownloads = document.getElementById('selectAllDownloads');
           const downloadSelected = document.getElementById('downloadSelected');
           const downloadSelection = document.getElementById('downloadSelection');
           const uploadForm = document.getElementById('uploadForm');
@@ -256,6 +274,9 @@ def create_application(config: WebConfig) -> tuple[Any, str]:
 
           function updateDownloadSelection() {{
             const count = downloadChoices.filter(item => item.checked).length;
+            selectAllDownloads.checked = downloadChoices.length > 0 && count === downloadChoices.length;
+            selectAllDownloads.indeterminate = count > 0 && count < downloadChoices.length;
+            selectAllDownloads.disabled = downloadChoices.length === 0;
             downloadSelection.textContent = count ? `已选择 ${{count}} 个文件` : '尚未选择文件';
             downloadSelected.disabled = count === 0;
           }}
@@ -306,6 +327,10 @@ def create_application(config: WebConfig) -> tuple[Any, str]:
           }}
           showDownloads.addEventListener('click', () => setTransferMode('download'));
           showUploads.addEventListener('click', () => setTransferMode('upload'));
+          selectAllDownloads.addEventListener('change', () => {{
+            for (const choice of downloadChoices) choice.checked = selectAllDownloads.checked;
+            updateDownloadSelection();
+          }});
           for (const choice of downloadChoices) choice.addEventListener('change', updateDownloadSelection);
           downloadSelected.addEventListener('click', async () => {{
             const selected = downloadChoices.filter(item => item.checked);
@@ -414,6 +439,7 @@ def create_application(config: WebConfig) -> tuple[Any, str]:
             if (currentUpload) currentUpload.abort();
           }});
           uploadRetry.addEventListener('click', () => runUploadQueue([...failedUploads]));
+          updateDownloadSelection();
           setTransferMode('download');
         </script>
         """
@@ -1093,12 +1119,18 @@ def _page(title: str, body: str) -> str:
     .batch-results {{ display: grid; gap: 6px; padding-left: 20px; margin-bottom: 0; }}
     .batch-results .success {{ color: #087443; }}
     .batch-results .failure {{ color: #b42318; }}
+    .file-table {{ overflow: hidden; border: 1px solid #d7e2ef; border-radius: 10px; }}
+    .file-grid {{ display: grid; grid-template-columns: 28px minmax(0, 1fr) 132px 92px 72px; gap: 10px; align-items: center; }}
+    .file-header {{ min-height: 42px; padding: 6px 10px; border-bottom: 1px solid #cbd8e6; background: #f2f6fb; color: #344054; font-size: 13px; font-weight: 700; }}
+    .file-header input, .download-choice {{ width: 20px; height: 20px; margin: 0; padding: 0; accent-color: #1264d8; }}
     .files {{ list-style: none; padding: 0; margin: 0; }}
-    .files li {{ display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 48px; padding: 8px 0; border-bottom: 1px solid #dfe5ed; }}
-    .file-choice {{ display: grid; grid-template-columns: 26px minmax(0, 1fr); align-items: center; flex: 1; min-width: 0; }}
-    .file-choice input {{ width: 20px; height: 20px; margin: 0; padding: 0; }}
+    .files li {{ min-height: 48px; padding: 7px 10px; border-bottom: 1px solid #dfe5ed; }}
+    .files li:last-child {{ border-bottom: 0; }}
+    .files li:hover {{ background: #edf6ff; }}
     .file-link {{ min-width: 0; padding: 8px 4px; overflow-wrap: anywhere; font-weight: 650; }}
-    .file-size {{ flex: none; color: #667085; font-size: 13px; }}
+    .file-modified, .file-type, .file-size {{ min-width: 0; color: #667085; font-size: 13px; }}
+    .file-size {{ text-align: right; }}
+    .files .empty {{ display: block; padding: 16px 10px; color: #667085; }}
     .transfer-status {{ min-height: 24px; margin-bottom: 0; color: #475467; overflow-wrap: anywhere; }}
     .bulk-bar {{ position: fixed; z-index: 10; left: 50%; bottom: 12px; transform: translateX(-50%); display: flex; align-items: center; justify-content: space-between; gap: 12px; width: min(728px, calc(100% - 32px)); padding: 12px 14px; border: 1px solid #d7deea; border-radius: 14px; background: #fff; box-shadow: 0 8px 28px #1822302b; }}
     .bulk-bar span {{ color: #475467; font-size: 14px; }}
@@ -1119,6 +1151,8 @@ def _page(title: str, body: str) -> str:
       .pairing-field {{ grid-template-columns: 108px minmax(0, 1fr); gap: 10px; }}
       .pairing-field > span {{ line-height: 1.3; }}
       .pairing-actions {{ padding-left: 118px; }}
+      .file-grid {{ grid-template-columns: 28px minmax(0, 1fr) 78px; gap: 8px; }}
+      .file-modified, .file-type {{ display: none; }}
       .file-size {{ max-width: 88px; text-align: right; }}
       .bulk-bar {{ width: calc(100% - 20px); bottom: 8px; }}
     }}
@@ -1132,9 +1166,22 @@ def _page(title: str, body: str) -> str:
       .download-panel {{ border-color: #285a7d; }}
       .upload-panel {{ border-color: #286a5a; }}
       .panel-kicker, .pairing-field > span {{ color: #b7c0cf; }}
-      .file-size, .transfer-status, .bulk-bar span {{ color: #b7c0cf; }}
+      .file-table {{ border-color: #344054; }}
+      .file-header {{ border-color: #344054; background: #202c3b; color: #d7e2ef; }}
+      .files li {{ border-color: #344054; }}
+      .files li:hover {{ background: #21364a; }}
+      .file-modified, .file-type, .file-size, .transfer-status, .bulk-bar span {{ color: #b7c0cf; }}
     }}
   </style>
 </head>
 <body>{body}</body>
 </html>"""
+
+
+def _format_modified_time(timestamp: float) -> str:
+    return datetime.fromtimestamp(timestamp).strftime("%Y/%m/%d %H:%M")
+
+
+def _file_type_label(relative_path: str) -> str:
+    suffix = Path(relative_path).suffix.removeprefix(".")
+    return f"{suffix.upper()} 文件" if suffix else "文件"
