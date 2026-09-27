@@ -4,9 +4,10 @@
 
 > 文档状态：修订稿 v4（第八阶段方案冻结版，持续记录阶段实施结果）
 > 适用对象：具备基础 Python 使用经验、暂不了解计算机通信原理的个人开发者
-> 当前进度：第六阶段已以 `0.6.0` 收官；第七阶段开发验收已通过并冻结为第八阶段基线。第八阶段 Phase 8A～8E 的安装状态、首次安装、事务升级/回滚、真实 Uninstall 和本机完整生命周期开发验收均已通过。实机暴露的 onefile TEMP 自清理、`StartupApproved` 派生状态残留和临时卸载页本地资源定位问题均已修复；182 项自动化回归、主程序 onedir、Setup/Uninstall onefile 构建自检及真实 `A 首装 → A 传输 → A→B 升级 → B 传输 → 保留数据卸载 → 重新安装 → 删除应用数据卸载` 闭环通过。RC1、RC2 均在最终发布验收前被后续界面与行为收口取代；当前已从 `ede7d1a` 冻结 RC3，Phase 8F 只测试 RC3。第二台无 Python、无源码、无旧安装历史的干净 Windows 11 门槛尚未完成，因此不得宣称正式发布验收结束。
+> 当前进度：第六阶段已以 `0.6.0` 收官；第七阶段开发验收已通过并冻结为第八阶段基线。第八阶段 Phase 8A～8E 的安装状态、首次安装、事务升级/回滚、真实 Uninstall 和本机完整生命周期开发验收均已通过。实机暴露的 onefile TEMP 自清理、`StartupApproved` 派生状态残留和临时卸载页本地资源定位问题均已修复；181 项自动化回归、64 个 Python 文件的语法/Ruff/Pyright 严格静态审查、主程序 onedir、Setup/Uninstall onefile 构建自检及真实 `A 首装 → A 传输 → A→B 升级 → B 传输 → 保留数据卸载 → 重新安装 → 删除应用数据卸载` 闭环通过。RC1～RC3 均在最终发布验收前被后续界面、行为或质量收口取代；当前已从 `dee710e` 冻结 RC4，Phase 8F 只测试 RC4。第二台无 Python、无源码、无旧安装历史的干净 Windows 11 门槛尚未完成，因此不得宣称正式发布验收结束。
 
 > 0.6.0-rc1 was superseded before final release acceptance by post-RC1 UI/behavior changes.
+> 0.6.0-rc3 was superseded before final release acceptance by repository-wide static governance and its packaging compatibility fix.
 > 暂定平台：Windows 11 服务机 + Android/Windows 浏览器客户机
 
 ## 1. 项目目标
@@ -972,11 +973,13 @@ Setup、临时 Uninstall、LanDrop 正常启动和 `pending_cleanup` 共用一�
 | 2026-09-26 | Phase 8E 本机安装生命周期开发验收通过 | A 首装/传输、A→B 事务升级、自启动禁用状态保持、两种数据策略卸载及系统状态恢复均在真实当前用户环境完成；Shared/Received 文件跨两轮卸载保持大小和 SHA-256 不变 |
 | 2026-09-26 | 临时 Uninstall 执行页改用独立实体资源，不向本地 `file:` URL 附加 mode 查询参数 | WebView2 会把查询串错误解释为本地文件名的一部分；独立 `execute.html` 修复“找不到文件”，并由退出兜底确保临时目录自清理 |
 | 2026-09-26 | Phase 8E 最终功能基线冻结在 `22d77ebe4e251aeeb6cd97a734ccb2978ac853e2` | 该提交包含独立临时卸载执行页与退出清理兜底；本机删除数据卸载复测通过后，不再把后续无关重构纳入当前发布候选 |
+| 2026-09-27 | 全仓 Python 静态治理完成 | 64 个 Python 文件分 8 批完成语法、Ruff 与 strict Pyright 零错误/零警告审查；181 项运行时回归通过 |
+| 2026-09-27 | RC4 取代 RC3 | 延迟加载 `pystray` 后补齐 PyInstaller hidden import 与打包契约测试；主程序、Uninstall、Setup 重新构建并通过产物自检 |
 
 ## 10. 下一步
 
-第八阶段 Phase 8A～8E 开发实现和本机生命周期开发验收已经完成。真实当前用户安装根已完整走通 `Setup A → 运行与双向传输 A → Setup B → 运行与双向传输 B → 保留数据卸载 → 重新安装 → 删除应用数据卸载`；升级保留 Windows 禁用的自启动状态，卸载清理 Run、精确 StartupApproved、Uninstall 登记、快捷方式、程序根和 onefile TEMP，且始终保留 Shared/Received 用户文件。实机发现的问题均已形成最小修复并完成 182 项回归与再次实测。除非 Phase 8F 暴露真实缺陷，不再主动扩展安装/卸载架构。
+第八阶段 Phase 8A～8E 开发实现和本机生命周期开发验收已经完成。真实当前用户安装根已完整走通 `Setup A → 运行与双向传输 A → Setup B → 运行与双向传输 B → 保留数据卸载 → 重新安装 → 删除应用数据卸载`；升级保留 Windows 禁用的自启动状态，卸载清理 Run、精确 StartupApproved、Uninstall 登记、快捷方式、程序根和 onefile TEMP，且始终保留 Shared/Received 用户文件。实机发现的问题均已形成最小修复并完成 181 项回归与再次实测；全仓静态审查也已收敛为零错误/零警告。除非 Phase 8F 暴露真实缺陷，不再主动扩展安装/卸载架构。
 
 下一步只进入 Phase 8F 发布验收：在无源码、无 venv、无独立 Python、无旧 LanDrop 安装历史的干净 Windows 11 上，从单个 `LanDrop-Setup.exe` 开始验证 WebView2 前置检查、离线安装边界、Private 实际传输、idle 与上传后多轮网络类别监控、Windows 原生防火墙行为、自启动但服务默认关闭、Public 拒绝、A→B 升级、Windows 卸载入口和系统状态恢复。第七阶段延期的干净环境验收与第八阶段发布验收合并执行；完成前不得宣称正式发布验收结束。
 
-Phase 8F 的唯一发布候选是 `0.6.0-rc3`（源码 `ede7d1a080e8bda6fbef8f5eb4b01b6a10c282e2`，Build ID `0.6.0-ede7d1a-20260926073141`）；P8-R01～R04 不得再使用 RC1 或 RC2 产物。
+Phase 8F 的唯一发布候选是 `0.6.0-rc4`（源码 `dee710e4b49e73cc366b2e8ccfe68219146b859b`，Build ID `0.6.0-dee710e-20260927131443`）；P8-R01～R04 不得再使用 RC1、RC2 或 RC3 产物。
