@@ -2,16 +2,17 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import contextlib
 import hashlib
 import json
 import os
-from pathlib import Path, PurePosixPath
 import secrets
-from typing import Iterable, Mapping
+from collections.abc import Iterable, Mapping
+from dataclasses import dataclass
+from pathlib import Path, PurePosixPath
+from typing import cast
 
 from .install_contract import PRODUCT_ID, is_reparse_object
-
 
 PAYLOAD_MANIFEST_SCHEMA_VERSION = 1
 _HASH_CHUNK_SIZE = 1024 * 1024
@@ -72,7 +73,7 @@ def build_payload_manifest(
     root = _validated_payload_root(payload_root)
     entries = tuple(
         PayloadFile(relative, size, digest)
-        for relative, path, size, digest in _inspect_payload_tree(root)
+        for relative, _path, size, digest in _inspect_payload_tree(root)
     )
     return _manifest_from_json(
         {
@@ -103,10 +104,8 @@ def write_payload_manifest(path: Path, manifest: PayloadManifest) -> None:
     except OSError as exc:
         raise PayloadManifestError(f"无法写入 payload manifest：{exc}") from exc
     finally:
-        try:
+        with contextlib.suppress(OSError):
             temporary.unlink(missing_ok=True)
-        except OSError:
-            pass
 
 
 def read_payload_manifest(path: Path) -> PayloadManifest:
@@ -116,13 +115,12 @@ def read_payload_manifest(path: Path) -> PayloadManifest:
     try:
         if source.stat().st_size > _MAX_MANIFEST_BYTES:
             raise PayloadManifestError("payload manifest 超过 8 MiB 上限。")
-        raw = json.loads(source.read_text(encoding="utf-8"))
+        parsed: object = json.loads(source.read_text(encoding="utf-8"))
     except PayloadManifestError:
         raise
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         raise PayloadManifestError(f"无法读取 payload manifest：{exc}") from exc
-    if not isinstance(raw, dict):
-        raise PayloadManifestError("payload manifest 根节点必须是 JSON 对象。")
+    raw = _json_object(parsed, "payload manifest 根节点")
     return _manifest_from_json(raw)
 
 
@@ -196,14 +194,14 @@ def _manifest_from_json(raw: Mapping[str, object]) -> PayloadManifest:
     product_id = _required_text(raw["product_id"], "product_id")
     if product_id != PRODUCT_ID:
         raise PayloadManifestError(f"payload product_id 不匹配：{product_id}")
-    files_raw = raw["files"]
-    if not isinstance(files_raw, list):
+    files_value = raw["files"]
+    if not isinstance(files_value, list):
         raise PayloadManifestError("payload files 必须是数组。")
+    files_raw = cast(list[object], files_value)
     entries: list[PayloadFile] = []
     seen: set[str] = set()
     for index, item in enumerate(files_raw):
-        if not isinstance(item, dict):
-            raise PayloadManifestError(f"payload files[{index}] 必须是对象。")
+        item = _json_object(item, f"payload files[{index}]")
         _require_exact_keys(item, {"path", "size", "sha256"}, f"files[{index}]")
         relative = _normalized_relative_text(item["path"])
         folded = relative.casefold()
@@ -280,6 +278,15 @@ def _require_exact_keys(raw: Mapping[str, object], expected: set[str], label: st
             f"{label} 字段不匹配；缺少 {sorted(expected - actual)}；"
             f"多出 {sorted(actual - expected)}。"
         )
+
+
+def _json_object(value: object, label: str) -> dict[str, object]:
+    if not isinstance(value, dict):
+        raise PayloadManifestError(f"{label}必须是 JSON 对象。")
+    raw = cast(dict[object, object], value)
+    if any(not isinstance(key, str) for key in raw):
+        raise PayloadManifestError(f"{label}的键必须是字符串。")
+    return {cast(str, key): child for key, child in raw.items()}
 
 
 def _validated_payload_root(payload_root: Path) -> Path:

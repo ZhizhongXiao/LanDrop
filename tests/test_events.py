@@ -1,11 +1,12 @@
 from __future__ import annotations
 
-from pathlib import Path
 import unittest
+from pathlib import Path
+
+from support import temporary_directory
 
 from landrop.events import SessionEventLog
 from landrop.lifecycle import SessionLifecycle
-from support import temporary_directory
 
 
 class SessionEventLogTests(unittest.TestCase):

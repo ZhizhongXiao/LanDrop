@@ -2,18 +2,19 @@
 
 from __future__ import annotations
 
-from contextlib import contextmanager
-from dataclasses import dataclass, field as dataclass_field
-from datetime import datetime, timezone
 import hashlib
 import json
 import os
-from pathlib import Path
 import re
 import secrets
 import threading
-from typing import Iterator
-
+from collections.abc import Generator, Mapping
+from contextlib import contextmanager
+from dataclasses import dataclass
+from dataclasses import field as dataclass_field
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import cast
 
 MAX_TRUSTED_CLIENTS = 20
 
@@ -78,11 +79,11 @@ class CredentialStore:
         """Build a credential without changing the persistent trust file."""
         client_id = secrets.token_urlsafe(9)
         token = secrets.token_urlsafe(32)
-        created_at = datetime.now(timezone.utc).isoformat()
+        created_at = datetime.now(UTC).isoformat()
         clean_name = " ".join(device_name.split())[:40]
         details = describe_user_agent(user_agent, client_hints)
         label = clean_name or details["device_label"]
-        record = {
+        record: dict[str, object] = {
             "client_id": client_id,
             "label": label,
             "device_name": clean_name,
@@ -104,7 +105,7 @@ class CredentialStore:
     def persist_prepared(
         self,
         prepared: PreparedCredential,
-    ) -> Iterator[CredentialPersistence]:
+    ) -> Generator[CredentialPersistence, None, None]:
         """Persist one prepared credential with compensating rollback.
 
         The store lock remains held until the caller confirms that its related
@@ -164,13 +165,28 @@ class CredentialStore:
     def _load(self) -> list[dict[str, object]]:
         try:
             content = self.path.read_text(encoding="utf-8")
-            payload = json.loads(content)
+            payload: object = json.loads(content)
         except FileNotFoundError:
             return []
         except (OSError, json.JSONDecodeError) as exc:
             raise RuntimeError(f"无法读取可信客户机记录：{exc}") from exc
-        records = payload.get("clients", []) if isinstance(payload, dict) else []
-        return records if isinstance(records, list) else []
+        if not isinstance(payload, dict):
+            return []
+        mapping = cast(dict[str, object], payload)
+        records = mapping.get("clients", [])
+        if not isinstance(records, list):
+            return []
+        normalized: list[dict[str, object]] = []
+        for value in cast(list[object], records):
+            if not isinstance(value, dict):
+                continue
+            record = cast(dict[object, object], value)
+            if not all(isinstance(key, str) for key in record):
+                continue
+            normalized.append(
+                {key: item for key, item in record.items() if isinstance(key, str)}
+            )
+        return normalized
 
     def _save(self, records: list[dict[str, object]]) -> None:
         self.data_directory.mkdir(parents=True, exist_ok=True)
@@ -191,7 +207,7 @@ def _token_hash(token: str) -> str:
     return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
 
-def _client_from_record(record: dict[str, object]) -> TrustedClient:
+def _client_from_record(record: Mapping[str, object]) -> TrustedClient:
     """Read both new structured records and legacy raw User-Agent labels."""
     stored_label = str(record.get("label") or "浏览器")
     has_structured_details = any(

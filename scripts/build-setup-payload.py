@@ -3,18 +3,16 @@
 from __future__ import annotations
 
 import argparse
-from pathlib import Path
 import sys
-
-
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
-
-from landrop.payload_manifest import build_payload_manifest, write_payload_manifest
+from pathlib import Path
 
 
 def main() -> int:
+    project_root = Path(__file__).resolve().parent.parent
+    if str(project_root) not in sys.path:
+        sys.path.insert(0, str(project_root))
+    from landrop.payload_manifest import build_payload_manifest, write_payload_manifest
+
     parser = argparse.ArgumentParser()
     parser.add_argument("--payload", type=Path, required=True)
     parser.add_argument("--manifest", type=Path, required=True)

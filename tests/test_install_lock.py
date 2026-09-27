@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 import os
-from pathlib import Path
 import subprocess
 import sys
 import threading
 import unittest
 import uuid
+from pathlib import Path
 
 from landrop.install_lock import InstallLifecycleLock, InstallLifecycleLockError
 

@@ -2,15 +2,14 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import hashlib
 import os
-from pathlib import Path
 import re
 import secrets
 import stat
-from typing import Mapping
-
+from collections.abc import Mapping
+from dataclasses import dataclass
+from pathlib import Path
 
 PRODUCT_ID = "LanDrop"
 DISPLAY_NAME = "LanDrop"
@@ -390,12 +389,12 @@ def _required_absolute_environment_path(
 
 
 def _validate_component(value: str, label: str) -> None:
-    if not isinstance(value, str) or _COMPONENT_PATTERN.fullmatch(value) is None:
+    if _COMPONENT_PATTERN.fullmatch(value) is None:
         raise InstallContractError(f"{label}不能用于事务目录名称：{value!r}")
 
 
 def _validate_transaction_id(value: str) -> None:
-    if not isinstance(value, str) or _TRANSACTION_ID_PATTERN.fullmatch(value) is None:
+    if _TRANSACTION_ID_PATTERN.fullmatch(value) is None:
         raise InstallContractError("事务 ID 必须是 32 位小写十六进制字符串。")
 
 

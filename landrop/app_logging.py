@@ -3,13 +3,12 @@
 from __future__ import annotations
 
 import logging
-from logging.handlers import RotatingFileHandler
-from pathlib import Path
 import sys
 import threading
+from collections.abc import Callable
+from logging.handlers import RotatingFileHandler
+from pathlib import Path
 from types import TracebackType
-from typing import Callable
-
 
 LOGGER_NAME = "landrop"
 LOG_FILENAME = "application.log"
@@ -53,6 +52,9 @@ def install_exception_hooks(logger: logging.Logger) -> Callable[[], None]:
         )
 
     def thread_hook(args: threading.ExceptHookArgs) -> None:
+        if args.exc_value is None:
+            logger.error("Unhandled thread exception without an exception value")
+            return
         logger.error(
             "Unhandled thread exception",
             exc_info=(args.exc_type, args.exc_value, args.exc_traceback),

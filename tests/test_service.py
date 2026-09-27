@@ -1,15 +1,17 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
 import threading
 import time
 import unittest
+from collections.abc import Callable
+from pathlib import Path
 from unittest.mock import patch
 
-from landrop.network import EndpointObservation
+from landrop.network import EndpointBaseline, EndpointObservation
 from landrop.service import ServiceController, ServiceError
 from landrop.trust import CredentialStore
+from landrop.web import WebConfig
 from tests.support import temporary_directory
 
 
@@ -28,6 +30,10 @@ class _StableEndpointChecker:
         return EndpointObservation(True, category="Private" if include_category else None)
 
 
+def _stable_checker(_baseline: EndpointBaseline) -> _StableEndpointChecker:
+    return _StableEndpointChecker()
+
+
 class _SequenceEndpointChecker:
     def __init__(self, observations: list[EndpointObservation]) -> None:
         self._observations = list(observations)
@@ -40,6 +46,13 @@ class _SequenceEndpointChecker:
             if len(self._observations) > 1:
                 return self._observations.pop(0)
             return self._observations[0]
+
+
+class _CategorySequenceEndpointChecker(_SequenceEndpointChecker):
+    def observe(self, *, include_category: bool = False) -> EndpointObservation:
+        if not include_category:
+            return EndpointObservation(True)
+        return super().observe(include_category=True)
 
 
 def _ready_diagnostics(_port: int, _program: str) -> dict[str, object]:
@@ -79,20 +92,59 @@ class ServiceControllerTests(unittest.TestCase):
         self.shared.mkdir()
         self.received.mkdir()
         self.servers: list[_FakeServer] = []
+        self.web_configs: list[WebConfig] = []
 
-        def server_factory(address: str, port: int, application: object) -> _FakeServer:
-            server = _FakeServer(address, port, application)
-            self.servers.append(server)
-            return server
+        self.controller = self._create_controller()
 
-        self.controller = ServiceController(
+    def _application_factory(self, config: WebConfig) -> tuple[object, str]:
+        self.web_configs.append(config)
+        return object(), "12345678"
+
+    def _server_factory(
+        self, address: str, port: int, application: object
+    ) -> _FakeServer:
+        server = _FakeServer(address, port, application)
+        self.servers.append(server)
+        return server
+
+    def _create_controller(
+        self,
+        *,
+        endpoint_checker_factory: Callable[[EndpointBaseline], object] = _stable_checker,
+        diagnostics_factory: Callable[[int, str], dict[str, object]] = _ready_diagnostics,
+        endpoint_check_interval: float = 3.0,
+        category_check_interval: float = 15.0,
+        endpoint_confirmation_delay: float = 0.75,
+    ) -> ServiceController:
+        return ServiceController(
             CredentialStore(self.root / "data"),
             discover=lambda: [_Interface()],
             select=lambda interfaces, selector: interfaces[0],
-            application_factory=lambda config: (object(), "12345678"),
-            server_factory=server_factory,
-            endpoint_checker_factory=lambda _baseline: _StableEndpointChecker(),
-            diagnostics_factory=_ready_diagnostics,
+            application_factory=self._application_factory,
+            server_factory=self._server_factory,
+            endpoint_checker_factory=endpoint_checker_factory,
+            diagnostics_factory=diagnostics_factory,
+            endpoint_check_interval=endpoint_check_interval,
+            category_check_interval=category_check_interval,
+            endpoint_confirmation_delay=endpoint_confirmation_delay,
+        )
+
+    def _replace_controller(
+        self,
+        *,
+        endpoint_checker_factory: Callable[[EndpointBaseline], object] = _stable_checker,
+        diagnostics_factory: Callable[[int, str], dict[str, object]] = _ready_diagnostics,
+        endpoint_check_interval: float = 3.0,
+        category_check_interval: float = 15.0,
+        endpoint_confirmation_delay: float = 0.75,
+    ) -> None:
+        self.controller.stop()
+        self.controller = self._create_controller(
+            endpoint_checker_factory=endpoint_checker_factory,
+            diagnostics_factory=diagnostics_factory,
+            endpoint_check_interval=endpoint_check_interval,
+            category_check_interval=category_check_interval,
+            endpoint_confirmation_delay=endpoint_confirmation_delay,
         )
 
     def tearDown(self) -> None:
@@ -125,10 +177,12 @@ class ServiceControllerTests(unittest.TestCase):
 
     def test_qr_invitation_is_local_only_cached_and_cleared_on_stop(self) -> None:
         self.controller.start(self.shared, self.received, 32)
-        lifecycle = self.controller._lifecycle
+        lifecycle = self.web_configs[-1].lifecycle
         self.assertIsNotNone(lifecycle)
         assert lifecycle is not None
-        secret = lifecycle.pairing_invitation()[2]  # type: ignore[index]
+        invitation = lifecycle.pairing_invitation()
+        assert invitation is not None
+        secret = invitation[2]
         captured: list[str] = []
 
         def render(url: str) -> str:
@@ -167,7 +221,7 @@ class ServiceControllerTests(unittest.TestCase):
     def test_old_session_cannot_stop_restarted_session(self) -> None:
         self.controller.start(self.shared, self.received)
         old_server = self.servers[-1]
-        old_lifecycle = self.controller._lifecycle
+        old_lifecycle = self.web_configs[-1].lifecycle
         self.controller.stop()
         self.controller.start(self.shared, self.received)
 
@@ -182,16 +236,19 @@ class ServiceControllerTests(unittest.TestCase):
 
     def test_window_close_cancels_active_transfer_and_records_reason(self) -> None:
         self.controller.start(self.shared, self.received)
-        assert self.controller._lifecycle is not None
-        transfer = self.controller._lifecycle.begin_transfer("download")
+        lifecycle = self.web_configs[-1].lifecycle
+        assert lifecycle is not None
+        transfer = lifecycle.begin_transfer("download")
         transfer.add_bytes(250_000)
 
         stopped = self.controller.stop("window_closed")
 
         self.assertFalse(stopped.running)
         self.assertEqual(stopped.stop_reason, "window_closed")
-        self.assertEqual(stopped.statistics["failed_downloads"], 1)
-        self.assertEqual(stopped.statistics["failures"], {"window_closed": 1})
+        statistics = stopped.statistics
+        assert statistics is not None
+        self.assertEqual(statistics["failed_downloads"], 1)
+        self.assertEqual(statistics["failures"], {"window_closed": 1})
         self.assertTrue(self.servers[-1].closed.is_set())
 
     def test_expected_action_rejects_old_revision_and_old_session(self) -> None:
@@ -271,10 +328,16 @@ class ServiceControllerTests(unittest.TestCase):
                 EndpointObservation(True, category="Private"),
             ]
         )
-        self.controller._endpoint_checker_factory = lambda _baseline: checker
-        self.controller._endpoint_check_interval = 0.1
-        self.controller._endpoint_confirmation_delay = 0.05
-        self.controller._category_check_interval = 10
+
+        def checker_factory(_baseline: EndpointBaseline) -> _SequenceEndpointChecker:
+            return checker
+
+        self._replace_controller(
+            endpoint_checker_factory=checker_factory,
+            endpoint_check_interval=0.1,
+            endpoint_confirmation_delay=0.05,
+            category_check_interval=10,
+        )
 
         self.controller.start(self.shared, self.received)
         time.sleep(0.25)
@@ -285,18 +348,24 @@ class ServiceControllerTests(unittest.TestCase):
         self.assertIn("瞬时异常已恢复", state.endpoint_detail)
 
     def test_transient_category_failure_recovers_and_service_continues(self) -> None:
-        checker = _SequenceEndpointChecker(
+        checker = _CategorySequenceEndpointChecker(
             [
                 EndpointObservation(True, error="网络类别查询失败：temporary"),
                 EndpointObservation(True, category="Private"),
             ]
         )
-        self.controller._endpoint_checker_factory = lambda _baseline: checker
-        self.controller._endpoint_check_interval = 0.1
+
+        def checker_factory(_baseline: EndpointBaseline) -> _SequenceEndpointChecker:
+            return checker
+
         # Make the first monitor tick unambiguously exercise the category path;
         # equality with the endpoint interval is scheduler-dependent.
-        self.controller._category_check_interval = 0.0
-        self.controller._endpoint_confirmation_delay = 0.05
+        self._replace_controller(
+            endpoint_checker_factory=checker_factory,
+            endpoint_check_interval=0.1,
+            category_check_interval=0.0,
+            endpoint_confirmation_delay=0.05,
+        )
 
         self.controller.start(self.shared, self.received)
         time.sleep(0.3)
@@ -307,16 +376,22 @@ class ServiceControllerTests(unittest.TestCase):
         self.assertNotEqual(state.stop_reason, "network_category_unavailable")
 
     def test_repeated_category_failure_stops_as_category_unavailable(self) -> None:
-        checker = _SequenceEndpointChecker(
+        checker = _CategorySequenceEndpointChecker(
             [
                 EndpointObservation(True, error="网络类别查询失败：timeout"),
                 EndpointObservation(True, error="网络类别查询失败：timeout"),
             ]
         )
-        self.controller._endpoint_checker_factory = lambda _baseline: checker
-        self.controller._endpoint_check_interval = 0.1
-        self.controller._category_check_interval = 0.0
-        self.controller._endpoint_confirmation_delay = 0.05
+
+        def checker_factory(_baseline: EndpointBaseline) -> _SequenceEndpointChecker:
+            return checker
+
+        self._replace_controller(
+            endpoint_checker_factory=checker_factory,
+            endpoint_check_interval=0.1,
+            category_check_interval=0.0,
+            endpoint_confirmation_delay=0.05,
+        )
 
         self.controller.start(self.shared, self.received)
         deadline = time.monotonic() + 1.5
@@ -331,16 +406,22 @@ class ServiceControllerTests(unittest.TestCase):
         self.assertIn("无法确认当前网络仍为 Private", state.message)
 
     def test_repeated_unknown_category_is_not_reported_as_category_change(self) -> None:
-        checker = _SequenceEndpointChecker(
+        checker = _CategorySequenceEndpointChecker(
             [
                 EndpointObservation(True, category="Unknown"),
                 EndpointObservation(True, category="Unknown"),
             ]
         )
-        self.controller._endpoint_checker_factory = lambda _baseline: checker
-        self.controller._endpoint_check_interval = 0.1
-        self.controller._category_check_interval = 0.0
-        self.controller._endpoint_confirmation_delay = 0.05
+
+        def checker_factory(_baseline: EndpointBaseline) -> _SequenceEndpointChecker:
+            return checker
+
+        self._replace_controller(
+            endpoint_checker_factory=checker_factory,
+            endpoint_check_interval=0.1,
+            category_check_interval=0.0,
+            endpoint_confirmation_delay=0.05,
+        )
 
         self.controller.start(self.shared, self.received)
         deadline = time.monotonic() + 1.5
@@ -358,9 +439,15 @@ class ServiceControllerTests(unittest.TestCase):
         checker = _SequenceEndpointChecker(
             [EndpointObservation(False), EndpointObservation(False)]
         )
-        self.controller._endpoint_checker_factory = lambda _baseline: checker
-        self.controller._endpoint_check_interval = 0.1
-        self.controller._endpoint_confirmation_delay = 0.05
+
+        def checker_factory(_baseline: EndpointBaseline) -> _SequenceEndpointChecker:
+            return checker
+
+        self._replace_controller(
+            endpoint_checker_factory=checker_factory,
+            endpoint_check_interval=0.1,
+            endpoint_confirmation_delay=0.05,
+        )
 
         self.controller.start(self.shared, self.received)
         deadline = time.monotonic() + 1.5
@@ -375,12 +462,18 @@ class ServiceControllerTests(unittest.TestCase):
         self.assertTrue(self.servers[-1].closed.is_set())
 
     def test_explicit_public_category_stops_without_second_observation(self) -> None:
-        checker = _SequenceEndpointChecker(
+        checker = _CategorySequenceEndpointChecker(
             [EndpointObservation(True, category="Public")]
         )
-        self.controller._endpoint_checker_factory = lambda _baseline: checker
-        self.controller._endpoint_check_interval = 0.1
-        self.controller._category_check_interval = 0.1
+
+        def checker_factory(_baseline: EndpointBaseline) -> _SequenceEndpointChecker:
+            return checker
+
+        self._replace_controller(
+            endpoint_checker_factory=checker_factory,
+            endpoint_check_interval=0.1,
+            category_check_interval=0.1,
+        )
 
         self.controller.start(self.shared, self.received)
         deadline = time.monotonic() + 1.5
@@ -400,20 +493,25 @@ class ServiceControllerTests(unittest.TestCase):
             release.wait(1)
             return _ready_diagnostics(_port, _program)
 
-        self.controller._diagnostics_factory = blocking_diagnostics
+        self._replace_controller(diagnostics_factory=blocking_diagnostics)
         started = time.monotonic()
         state = self.controller.start(self.shared, self.received)
 
         self.assertLess(time.monotonic() - started, 0.5)
-        self.assertEqual(state.diagnostics["status"], "checking")
+        diagnostics = state.diagnostics
+        assert diagnostics is not None
+        self.assertEqual(diagnostics["status"], "checking")
         release.set()
         deadline = time.monotonic() + 1
-        while (
-            self.controller.snapshot().diagnostics["status"] == "checking"
-            and time.monotonic() < deadline
-        ):
+        while time.monotonic() < deadline:
+            diagnostics = self.controller.snapshot().diagnostics
+            assert diagnostics is not None
+            if diagnostics["status"] != "checking":
+                break
             time.sleep(0.01)
-        self.assertEqual(self.controller.snapshot().diagnostics["status"], "ready")
+        diagnostics = self.controller.snapshot().diagnostics
+        assert diagnostics is not None
+        self.assertEqual(diagnostics["status"], "ready")
 
 
 if __name__ == "__main__":

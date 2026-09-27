@@ -1,19 +1,19 @@
 from __future__ import annotations
 
-from dataclasses import replace
-from datetime import datetime, timezone
 import json
+import unittest
+from dataclasses import replace
+from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import patch
-import unittest
 
 from landrop.install_contract import InstallPaths, transaction_directory_name
 from landrop.install_state import (
     IncompleteInstallationError,
+    InstallationStateStore,
     InstallHistoryError,
     InstallHistoryLog,
     InstallRecord,
-    InstallationStateStore,
     InstallStateError,
     TransactionRecord,
 )
@@ -31,26 +31,30 @@ class InstallStateTests(unittest.TestCase):
 
     def _transaction(self, *, kind: str = "upgrade") -> TransactionRecord:
         transaction_id = "c" * 32
-        kwargs: dict[str, object] = {
-            "transaction_id": transaction_id,
-            "kind": kind,
-            "target_version": "0.8.0",
-            "target_build_id": "build-b",
-            "staging_directory": transaction_directory_name(
+        if kind == "upgrade":
+            return TransactionRecord.create(
+                transaction_id=transaction_id,
+                kind=kind,
+                target_version="0.8.0",
+                target_build_id="build-b",
+                staging_directory=transaction_directory_name(
+                    "staging", "0.8.0", transaction_id
+                ),
+                source_version="0.7.0",
+                source_build_id="build-a",
+                rollback_directory=transaction_directory_name(
+                    "rollback", "0.7.0", transaction_id
+                ),
+            )
+        return TransactionRecord.create(
+            transaction_id=transaction_id,
+            kind=kind,
+            target_version="0.8.0",
+            target_build_id="build-b",
+            staging_directory=transaction_directory_name(
                 "staging", "0.8.0", transaction_id
             ),
-        }
-        if kind == "upgrade":
-            kwargs.update(
-                {
-                    "source_version": "0.7.0",
-                    "source_build_id": "build-a",
-                    "rollback_directory": transaction_directory_name(
-                        "rollback", "0.7.0", transaction_id
-                    ),
-                }
-            )
-        return TransactionRecord.create(**kwargs)  # type: ignore[arg-type]
+        )
 
     def test_install_json_round_trip_is_exact_and_atomic(self) -> None:
         with temporary_directory() as temporary:
@@ -72,7 +76,7 @@ class InstallStateTests(unittest.TestCase):
             store = InstallationStateStore(paths)
             paths.metadata_directory.mkdir(parents=True)
             base = InstallRecord.create(paths, version="0.8.0", build_id="b").to_json()
-            cases = []
+            cases: list[dict[str, object]] = []
             extra = dict(base)
             extra["session_id"] = "forbidden"
             cases.append(extra)
@@ -135,12 +139,14 @@ class InstallStateTests(unittest.TestCase):
                 store.ensure_normal_start_allowed()
             self.assertIn("损坏", str(malformed.exception))
 
+            def is_transaction(path: Path) -> bool:
+                return path.name == "transaction.json"
+
             with patch(
                 "landrop.install_contract.is_reparse_object",
-                side_effect=lambda path: path.name == "transaction.json",
-            ):
-                with self.assertRaises(IncompleteInstallationError):
-                    store.ensure_normal_start_allowed()
+                side_effect=is_transaction,
+            ), self.assertRaises(IncompleteInstallationError):
+                store.ensure_normal_start_allowed()
 
     def test_state_write_rejects_reparse_metadata_directory(self) -> None:
         with temporary_directory() as temporary:
@@ -148,19 +154,22 @@ class InstallStateTests(unittest.TestCase):
             paths.metadata_directory.mkdir(parents=True)
             store = InstallationStateStore(paths)
             record = InstallRecord.create(paths, version="0.8.0", build_id="build-b")
+
+            def is_metadata(path: Path) -> bool:
+                return path.name == "metadata"
+
             with patch(
                 "landrop.install_contract.is_reparse_object",
-                side_effect=lambda path: path.name == "metadata",
-            ):
-                with self.assertRaises(InstallStateError):
-                    store.write_install(record)
+                side_effect=is_metadata,
+            ), self.assertRaises(InstallStateError):
+                store.write_install(record)
 
     def test_history_is_append_only_utf8_jsonl_and_rejects_sensitive_details(self) -> None:
         with temporary_directory() as temporary:
             paths = self._paths(Path(temporary))
             history = InstallHistoryLog(
                 paths,
-                now=lambda: datetime(2026, 9, 24, tzinfo=timezone.utc),
+                now=lambda: datetime(2026, 9, 24, tzinfo=UTC),
             )
             history.append("installed", version="0.8.0", result="ok")
             history.append(
@@ -196,9 +205,8 @@ class InstallStateTests(unittest.TestCase):
             with patch(
                 "landrop.install_state.validate_data_child",
                 side_effect=OSError("denied"),
-            ):
-                with self.assertRaises(InstallHistoryError):
-                    history.append("installed", version="0.8.0", result="ok")
+            ), self.assertRaises(InstallHistoryError):
+                history.append("installed", version="0.8.0", result="ok")
             self.assertEqual(store.read_install(), record)
 
 

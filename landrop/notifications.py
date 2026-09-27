@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
-from typing import Callable, Protocol
+from datetime import UTC, datetime, timedelta
+from typing import Protocol
 
 from .install_contract import APP_USER_MODEL_ID
 
@@ -49,7 +49,7 @@ class WindowsToastBackend:
         toast = Toast(
             ["LanDrop 即将关闭服务", "剩余约 60 秒；可打开窗口、重置计时或关闭服务。"],
             group=TOAST_GROUP,
-            expiration_time=datetime.now(timezone.utc) + timedelta(minutes=2),
+            expiration_time=datetime.now(UTC) + timedelta(minutes=2),
         )
         toast.tag = f"{session_id[:24]}-{deadline_revision}"
         toast.AddAction(ToastButton("打开窗口", "open_window"))
@@ -81,7 +81,7 @@ class WindowsToastBackend:
         toast = Toast(
             ["LanDrop 服务已自动关闭", AUTOMATIC_STOP_MESSAGES[reason]],
             group=STATUS_TOAST_GROUP,
-            expiration_time=datetime.now(timezone.utc) + timedelta(hours=1),
+            expiration_time=datetime.now(UTC) + timedelta(hours=1),
         )
         toast.tag = "service-stopped"
         toast.on_activated = lambda _event: self._handler("open_window", "", 0)

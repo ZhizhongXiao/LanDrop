@@ -1,18 +1,22 @@
 from __future__ import annotations
 
-from dataclasses import replace
-from datetime import datetime, timedelta, timezone
 import base64
 import hashlib
 import json
 import os
-from pathlib import Path
 import unittest
+from dataclasses import replace
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from unittest import mock
 
-from landrop.install_contract import InstallPaths, uninstall_directory_name
-from landrop.install_state import InstallRecord, InstallationStateStore, TransactionRecord
-from landrop.system_integration import SystemIntegrationRemovalResult
+from landrop.install_contract import (
+    InstallPaths,
+    UnsafeInstallPathError,
+    uninstall_directory_name,
+)
+from landrop.install_state import InstallationStateStore, InstallRecord, TransactionRecord
+from landrop.system_integration import IntegrationPlan, SystemIntegrationRemovalResult
 from landrop.uninstaller import (
     UninstallError,
     UninstallLifecycleService,
@@ -20,7 +24,6 @@ from landrop.uninstaller import (
     UninstallSelection,
     canonical_request_bytes,
     clean_selected_user_data,
-    preflight_install_root_removal,
     read_bound_request,
     safe_remove_install_root,
     schedule_temp_self_cleanup,
@@ -29,10 +32,12 @@ from tests.support import temporary_directory
 
 
 class _Lock:
-    def __init__(self, _paths: InstallPaths) -> None:
+    def __init__(self, paths: InstallPaths) -> None:
+        del paths
         self.closed = False
 
-    def acquire(self, _timeout: float) -> bool:
+    def acquire(self, timeout_seconds: float | None = 0.0) -> bool:
+        del timeout_seconds
         return True
 
     def close(self) -> None:
@@ -44,7 +49,8 @@ class _Integration:
         self.residuals = residuals
         self.calls = 0
 
-    def remove_owned(self, _plan) -> SystemIntegrationRemovalResult:
+    def remove_owned(self, plan: IntegrationPlan) -> SystemIntegrationRemovalResult:
+        del plan
         self.calls += 1
         return SystemIntegrationRemovalResult(
             removed=("run_value", "start_menu_shortcut", "uninstall_key"),
@@ -62,7 +68,9 @@ class UninstallerTests(unittest.TestCase):
             root / "Temp Folder",
         )
 
-    def _installed(self, root: Path, *, build_id: str = "build-a"):
+    def _installed(
+        self, root: Path, *, build_id: str = "build-a"
+    ) -> tuple[InstallPaths, InstallationStateStore, InstallRecord]:
         paths = self._paths(root)
         paths.app_directory.mkdir(parents=True)
         paths.maintenance_directory.mkdir(parents=True)
@@ -74,12 +82,17 @@ class UninstallerTests(unittest.TestCase):
         store.write_install(record)
         return paths, store, record
 
-    def _service(self, paths: InstallPaths, store: InstallationStateStore, integration=None):
+    def _service(
+        self,
+        paths: InstallPaths,
+        store: InstallationStateStore,
+        integration: _Integration | None = None,
+    ) -> UninstallLifecycleService:
         return UninstallLifecycleService(
             paths=paths,
             integration=integration or _Integration(),
             state_store=store,
-            now=lambda: datetime(2026, 9, 24, 12, 0, tzinfo=timezone.utc),
+            now=lambda: datetime(2026, 9, 24, 12, 0, tzinfo=UTC),
             lock_factory=_Lock,
             process_checker=lambda _path: False,
             pid_waiter=lambda _pid, _timeout: True,
@@ -160,7 +173,7 @@ class UninstallerTests(unittest.TestCase):
             )
 
     def test_nonce_hash_expiry_and_canonical_encoding_are_bound(self) -> None:
-        now = datetime(2026, 9, 24, 12, 0, tzinfo=timezone.utc)
+        now = datetime(2026, 9, 24, 12, 0, tzinfo=UTC)
         request = UninstallRequest(
             nonce="ab" * 32,
             created_at=now.isoformat(),
@@ -224,7 +237,7 @@ class UninstallerTests(unittest.TestCase):
                 paths=paths,
                 integration=integration,
                 state_store=store,
-                now=lambda: datetime(2026, 9, 24, 12, 0, tzinfo=timezone.utc),
+                now=lambda: datetime(2026, 9, 24, 12, 0, tzinfo=UTC),
                 lock_factory=_Lock,
                 process_checker=lambda _path: False,
                 pid_waiter=lambda _pid, _timeout: False,
@@ -254,7 +267,7 @@ class UninstallerTests(unittest.TestCase):
                 paths=paths,
                 integration=integration,
                 state_store=store,
-                now=lambda: datetime(2026, 9, 24, 12, 0, tzinfo=timezone.utc),
+                now=lambda: datetime(2026, 9, 24, 12, 0, tzinfo=UTC),
                 lock_factory=_Lock,
                 process_checker=lambda _path: False,
                 pid_waiter=lambda _pid, _timeout: True,
@@ -290,7 +303,7 @@ class UninstallerTests(unittest.TestCase):
                 handoff.request_path,
                 nonce=handoff.nonce,
                 expected_sha256=handoff.expected_request_sha256,
-                now=datetime(2026, 9, 24, 12, 0, tzinfo=timezone.utc),
+                now=datetime(2026, 9, 24, 12, 0, tzinfo=UTC),
             )
             changed = replace(request, install_root=str(root / "Other Product"))
             payload = canonical_request_bytes(changed)
@@ -367,12 +380,14 @@ class UninstallerTests(unittest.TestCase):
             marker.mkdir()
             original = __import__("landrop.uninstaller", fromlist=["is_reparse_object"]).is_reparse_object
 
+            def is_marker(path: Path) -> bool:
+                return _same(path, marker) or original(path)
+
             with mock.patch(
                 "landrop.uninstaller.is_reparse_object",
-                side_effect=lambda path: _same(path, marker) or original(path),
-            ):
-                with self.assertRaises(Exception):
-                    safe_remove_install_root(paths)
+                side_effect=is_marker,
+            ), self.assertRaises(UnsafeInstallPathError):
+                safe_remove_install_root(paths)
 
             self.assertTrue(paths.main_executable.exists())
             self.assertTrue(marker.exists())
@@ -392,17 +407,19 @@ class UninstallerTests(unittest.TestCase):
             marker.mkdir()
             original = __import__("landrop.uninstaller", fromlist=["is_reparse_object"]).is_reparse_object
 
+            def is_marker(path: Path) -> bool:
+                return _same(path, marker) or original(path)
+
             with mock.patch(
                 "landrop.uninstaller.is_reparse_object",
-                side_effect=lambda path: _same(path, marker) or original(path),
-            ):
-                with self.assertRaisesRegex(Exception, "reparse object"):
-                    service.execute_handoff(
-                        current_executable=handoff.temporary_executable,
-                        request_path=handoff.request_path,
-                        nonce=handoff.nonce,
-                        expected_request_sha256=handoff.expected_request_sha256,
-                    )
+                side_effect=is_marker,
+            ), self.assertRaisesRegex(UnsafeInstallPathError, "reparse object"):
+                service.execute_handoff(
+                    current_executable=handoff.temporary_executable,
+                    request_path=handoff.request_path,
+                    nonce=handoff.nonce,
+                    expected_request_sha256=handoff.expected_request_sha256,
+                )
 
             self.assertEqual(integration.calls, 0)
             self.assertTrue(paths.main_executable.exists())
@@ -475,9 +492,11 @@ class UninstallerTests(unittest.TestCase):
             outside = root / "outside"
             outside.mkdir()
 
-            with mock.patch("landrop.uninstaller.subprocess.Popen") as popen:
-                with self.assertRaises(Exception):
-                    schedule_temp_self_cleanup(outside, paths)
+            with (
+                mock.patch("landrop.uninstaller.subprocess.Popen") as popen,
+                self.assertRaises(UnsafeInstallPathError),
+            ):
+                schedule_temp_self_cleanup(outside, paths)
 
             popen.assert_not_called()
 

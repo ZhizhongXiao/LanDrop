@@ -1,13 +1,12 @@
 from __future__ import annotations
 
-from pathlib import Path
 import re
 import unittest
+from pathlib import Path
 
 from PIL import Image
 
-import landrop.gui as gui
-
+from landrop import gui
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DESKTOP_ROOT = PROJECT_ROOT / "ui" / "desktop"
@@ -25,7 +24,7 @@ class DesktopResourceTests(unittest.TestCase):
             DESKTOP_ROOT / "js" / "app.js",
         )
         self.assertTrue(all(path.is_file() for path in expected))
-        self.assertEqual(gui._desktop_entry_path().resolve(), expected[0].resolve())
+        self.assertEqual(gui.desktop_entry_path().resolve(), expected[0].resolve())
 
         gui_source = Path(gui.__file__).read_text(encoding="utf-8")
         self.assertNotIn("DESKTOP_HTML", gui_source)

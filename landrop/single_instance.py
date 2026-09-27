@@ -2,17 +2,18 @@
 
 from __future__ import annotations
 
+import contextlib
 import ctypes
-from ctypes import wintypes
 import json
 import os
-from pathlib import Path
 import secrets
 import socket
 import threading
 import time
-from typing import Callable
-
+from collections.abc import Callable
+from ctypes import wintypes
+from pathlib import Path
+from typing import Self, cast
 
 ERROR_ALREADY_EXISTS = 183
 
@@ -34,7 +35,7 @@ class DesktopSingleInstance:
         self._state_path = self._data_directory / "desktop-instance.json"
         self._mutex_name = mutex_name
         self._mutex: int | None = None
-        self._kernel32: object | None = None
+        self._close_handle_function: Callable[[wintypes.HANDLE], int] | None = None
         self._listener: socket.socket | None = None
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
@@ -54,7 +55,9 @@ class DesktopSingleInstance:
         handle = kernel32.CreateMutexW(None, False, self._mutex_name)
         if not handle:
             raise SingleInstanceError(f"无法创建单实例锁（Windows 错误 {ctypes.get_last_error()}）。")
-        self._kernel32 = kernel32
+        self._close_handle_function = cast(
+            Callable[[wintypes.HANDLE], int], kernel32.CloseHandle
+        )
         self._mutex = int(handle)
         if ctypes.get_last_error() == ERROR_ALREADY_EXISTS:
             return False
@@ -90,10 +93,8 @@ class DesktopSingleInstance:
         self._stop.set()
         listener = self._listener
         if listener is not None:
-            try:
+            with contextlib.suppress(OSError):
                 listener.close()
-            except OSError:
-                pass
         thread = self._thread
         if thread is not None and thread is not threading.current_thread():
             thread.join(1.0)
@@ -105,12 +106,12 @@ class DesktopSingleInstance:
                 self._state_path.unlink(missing_ok=True)
         except (OSError, ValueError, AttributeError, json.JSONDecodeError):
             pass
-        if self._mutex is not None and self._kernel32 is not None:
+        if self._mutex is not None and self._close_handle_function is not None:
             try:
-                self._kernel32.CloseHandle(wintypes.HANDLE(self._mutex))
+                self._close_handle_function(wintypes.HANDLE(self._mutex))
             finally:
                 self._mutex = None
-                self._kernel32 = None
+                self._close_handle_function = None
 
     def _start_activation_listener(self) -> None:
         listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -150,7 +151,7 @@ class DesktopSingleInstance:
         while not self._stop.is_set():
             try:
                 connection, _address = self._listener.accept()
-            except socket.timeout:
+            except TimeoutError:
                 continue
             except OSError:
                 return
@@ -176,7 +177,7 @@ class DesktopSingleInstance:
                 return
         callback()
 
-    def __enter__(self) -> DesktopSingleInstance:
+    def __enter__(self) -> Self:
         if not self.acquire():
             raise SingleInstanceError("LanDrop 已在运行。")
         return self

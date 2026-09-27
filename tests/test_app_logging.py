@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-import logging
-from pathlib import Path
 import unittest
+from pathlib import Path
+
+from support import temporary_directory
 
 from landrop.app_logging import configure_application_logging
-from support import temporary_directory
 
 
 class ApplicationLoggingTests(unittest.TestCase):

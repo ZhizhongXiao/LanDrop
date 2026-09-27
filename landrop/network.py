@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import ctypes
-from ctypes import wintypes
-from dataclasses import dataclass
 import ipaddress
 import json
 import os
@@ -12,10 +10,13 @@ import socket
 import struct
 import subprocess
 import winreg
-
+from collections.abc import Callable
+from ctypes import wintypes
+from dataclasses import dataclass
+from typing import cast
 
 POWERSHELL = os.path.join(
-    os.environ.get("SystemRoot", r"C:\Windows"),
+    os.environ.get("SYSTEMROOT", r"C:\Windows"),
     "System32",
     "WindowsPowerShell",
     "v1.0",
@@ -198,22 +199,24 @@ class EndpointChecker:
         self,
         baseline: EndpointBaseline,
         *,
-        address_reader=None,
-        category_reader=None,
+        address_reader: Callable[[], list[tuple[str, int]]] | None = None,
+        category_reader: Callable[[int], str] | None = None,
     ) -> None:
+        def default_category_reader(interface_index: int) -> str:
+            return read_network_category(interface_index, alias=baseline.alias)
+
         self.baseline = baseline
-        self._address_reader = address_reader or _read_ipv4_table
-        self._category_reader = category_reader or (
-            lambda interface_index: read_network_category(
-                interface_index,
-                alias=baseline.alias,
-            )
+        self._address_reader: Callable[[], list[tuple[str, int]]] = (
+            address_reader or _read_ipv4_table
+        )
+        self._category_reader: Callable[[int], str] = (
+            category_reader or default_category_reader
         )
 
     def observe(self, *, include_category: bool = False) -> EndpointObservation:
         try:
             addresses = self._address_reader()
-        except Exception as exc:
+        except (NetworkDiscoveryError, OSError, subprocess.SubprocessError) as exc:
             return EndpointObservation(None, error=f"IPv4 查询失败：{exc}")
 
         present = (self.baseline.address, self.baseline.interface_index) in addresses
@@ -222,7 +225,7 @@ class EndpointChecker:
 
         try:
             category = self._category_reader(self.baseline.interface_index)
-        except Exception as exc:
+        except (NetworkDiscoveryError, OSError, subprocess.SubprocessError) as exc:
             return EndpointObservation(present, error=f"网络类别查询失败：{exc}")
         return EndpointObservation(present, category=category)
 
@@ -294,13 +297,14 @@ $item = Get-NetConnectionProfile -InterfaceIndex {index} -ErrorAction Stop
 
     output = completed.stdout.strip()
     try:
-        record = json.loads(output or "null")
+        parsed: object = json.loads(output or "null")
     except json.JSONDecodeError:
         return None, "Windows 网络类别查询返回了无法解析的数据。"
-    if not isinstance(record, dict):
+    record = _json_object(parsed)
+    if record is None:
         return None, ""
     try:
-        if int(record["interface_index"]) != index:
+        if _integer_value(record["interface_index"]) != index:
             return None, ""
     except (KeyError, TypeError, ValueError):
         return None, ""
@@ -309,7 +313,7 @@ $item = Get-NetConnectionProfile -InterfaceIndex {index} -ErrorAction Stop
 
 def _read_wifi_registry_profile() -> dict[str, object] | None:
     """Fallback for restricted shells: match the active SSID to NetworkList."""
-    netsh = os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "System32", "netsh.exe")
+    netsh = os.path.join(os.environ.get("SYSTEMROOT", r"C:\Windows"), "System32", "netsh.exe")
     creation_flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
     try:
         completed = subprocess.run(
@@ -398,17 +402,24 @@ def _read_connection_profiles_result(
 
     output = completed.stdout.strip()
     try:
-        records = json.loads(output or "[]")
+        parsed: object = json.loads(output or "[]")
     except json.JSONDecodeError:
         return {}, "Windows 网络类别查询返回了无法解析的数据。"
 
-    if isinstance(records, dict):
-        records = [records]
+    if isinstance(parsed, dict):
+        raw_records: list[object] = [parsed]
+    elif isinstance(parsed, list):
+        raw_records = cast(list[object], parsed)
+    else:
+        return {}, ""
 
     profiles: dict[int, dict[str, object]] = {}
-    for record in records:
+    for raw_record in raw_records:
+        record = _json_object(raw_record)
+        if record is None:
+            continue
         try:
-            profiles[int(record["interface_index"])] = record
+            profiles[_integer_value(record["interface_index"])] = record
         except (KeyError, TypeError, ValueError):
             continue
     return profiles, ""
@@ -539,7 +550,7 @@ def format_interfaces(interfaces: list[LanInterface]) -> str:
     if not interfaces:
         return "未检测到活动 IPv4 接口。"
     headers = ("接口", "IPv4", "类别", "连通性", "网关", "用途")
-    rows = []
+    rows: list[tuple[str, ...]] = []
     for item in interfaces:
         role = "排除" if item.is_excluded or not item.is_lan_ipv4 else "LAN 候选"
         rows.append(
@@ -562,3 +573,19 @@ def format_interfaces(interfaces: list[LanInterface]) -> str:
 
     separator = tuple("-" * width for width in widths)
     return "\n".join([line(headers), line(separator), *(line(row) for row in rows)])
+
+
+def _json_object(value: object) -> dict[str, object] | None:
+    """Normalize an untyped JSON object after validating string keys."""
+    if not isinstance(value, dict):
+        return None
+    raw = cast(dict[object, object], value)
+    if any(not isinstance(key, str) for key in raw):
+        return None
+    return {cast(str, key): child for key, child in raw.items()}
+
+
+def _integer_value(value: object) -> int:
+    if isinstance(value, bool) or not isinstance(value, int | str):
+        raise TypeError("值不能转换为整数。")
+    return int(value)

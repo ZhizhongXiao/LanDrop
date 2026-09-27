@@ -2,21 +2,23 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
 import ctypes
-from ctypes import wintypes
 import hashlib
 import json
+import logging
 import os
-from pathlib import Path
 import secrets
 import shutil
 import stat
 import subprocess
 import sys
 import time
-from typing import Callable, Mapping, Protocol
+from collections.abc import Callable, Mapping
+from ctypes import wintypes
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
+from typing import Protocol, cast
 
 from .install_contract import (
     PRODUCT_ID,
@@ -30,14 +32,13 @@ from .install_contract import (
     validate_uninstall_temp_directory,
 )
 from .install_lock import InstallLifecycleLock
-from .install_state import InstallHistoryLog, InstallRecord, InstallationStateStore
+from .install_state import InstallationStateStore, InstallHistoryLog, InstallRecord
 from .system_integration import (
     IntegrationPlan,
     SystemIntegrationRemovalResult,
     installed_size_kib,
 )
 from .upgrade import is_executable_running
-
 
 UNINSTALL_REQUEST_SCHEMA_VERSION = 1
 UNINSTALL_REQUEST_FILENAME = "request.json"
@@ -48,6 +49,8 @@ _SHA256_HEX_LENGTH = 64
 _PROCESS_SYNCHRONIZE = 0x00100000
 _WAIT_OBJECT_0 = 0x00000000
 _WAIT_TIMEOUT = 0x00000102
+
+logger = logging.getLogger(__name__)
 
 
 class UninstallError(RuntimeError):
@@ -152,6 +155,16 @@ class UninstallIntegration(Protocol):
     def remove_owned(self, plan: IntegrationPlan) -> SystemIntegrationRemovalResult: ...
 
 
+class UninstallLifecycleLock(Protocol):
+    def acquire(self, timeout_seconds: float | None = 0.0) -> bool: ...
+
+    def close(self) -> None: ...
+
+
+def _default_lock_factory(paths: InstallPaths) -> UninstallLifecycleLock:
+    return InstallLifecycleLock(paths)
+
+
 class UninstallLifecycleService:
     """Prepare a bound handoff and execute it only from the controlled TEMP copy."""
 
@@ -163,7 +176,7 @@ class UninstallLifecycleService:
         state_store: InstallationStateStore | None = None,
         history: InstallHistoryLog | None = None,
         now: Callable[[], datetime] | None = None,
-        lock_factory: Callable[[InstallPaths], object] | None = None,
+        lock_factory: Callable[[InstallPaths], UninstallLifecycleLock] | None = None,
         process_checker: Callable[[Path], bool] | None = None,
         pid_waiter: Callable[[int, float], bool] | None = None,
         executable_waiter: Callable[[Path, float], bool] | None = None,
@@ -172,8 +185,8 @@ class UninstallLifecycleService:
         self.integration = integration
         self.state_store = state_store or InstallationStateStore(paths)
         self.history = history or InstallHistoryLog(paths)
-        self._now = now or (lambda: datetime.now(timezone.utc))
-        self._lock_factory = lock_factory or (lambda target: InstallLifecycleLock(target))
+        self._now = now or (lambda: datetime.now(UTC))
+        self._lock_factory = lock_factory or _default_lock_factory
         self._process_checker = process_checker or is_executable_running
         self._pid_waiter = pid_waiter or wait_for_process_exit
         self._executable_waiter = executable_waiter or wait_for_executable_exit
@@ -190,6 +203,7 @@ class UninstallLifecycleService:
         if os.path.lexists(self.paths.transaction_state_path):
             # Reading forces damaged state to fail closed as well.
             transaction = self.state_store.read_transaction(required=True)
+            assert transaction is not None
             raise UninstallError(
                 f"检测到未完成的安装事务（{transaction.stage}），请先重新运行 Setup。"
             )
@@ -220,7 +234,7 @@ class UninstallLifecycleService:
 
         request_path = temporary_directory / UNINSTALL_REQUEST_FILENAME
         temporary_executable = temporary_directory / "Uninstall.exe"
-        created = self._now().astimezone(timezone.utc)
+        created = self._now().astimezone(UTC)
         request = UninstallRequest(
             nonce=nonce,
             created_at=created.isoformat(),
@@ -256,7 +270,7 @@ class UninstallLifecycleService:
             try:
                 safe_remove_temp_tree(temporary_directory, self.paths)
             except Exception:
-                pass
+                logger.exception("Failed to remove incomplete uninstall handoff")
             raise
 
     def execute_handoff(
@@ -295,7 +309,7 @@ class UninstallLifecycleService:
         lock = self._lock_factory(self.paths)
         acquired = False
         try:
-            acquired = bool(lock.acquire(30.0))  # type: ignore[attr-defined]
+            acquired = lock.acquire(30.0)
             if not acquired:
                 raise UninstallError("LanDrop 正在安装、升级或卸载，请稍后重试。")
             record = self.state_store.read_install(required=True)
@@ -309,12 +323,12 @@ class UninstallLifecycleService:
             return self._remove_committed_install(request, record, temporary_directory)
         finally:
             if acquired:
-                lock.close()  # type: ignore[attr-defined]
+                lock.close()
             else:
                 try:
-                    lock.close()  # type: ignore[attr-defined]
+                    lock.close()
                 except Exception:
-                    pass
+                    logger.exception("Failed to close unacquired uninstall lifecycle lock")
 
     def _remove_committed_install(
         self,
@@ -334,6 +348,7 @@ class UninstallLifecycleService:
                     result="started",
                 )
             except Exception as exc:
+                logger.exception("Failed to append uninstall_started history event")
                 residuals.append(f"无法记录 uninstall_started：{exc}")
 
         estimated_size = _registered_size_fallback(self.paths)
@@ -350,11 +365,13 @@ class UninstallLifecycleService:
             safe_remove_install_root(self.paths)
             _write_temp_log(temporary_directory, "program_root_removed")
         except Exception as exc:
+            logger.exception("Failed to remove LanDrop install root")
             residuals.append(f"程序根未完整删除：{exc}")
 
         try:
             deleted_data.extend(clean_selected_user_data(self.paths, request.selection))
         except Exception as exc:
+            logger.exception("Failed to remove selected LanDrop user data")
             residuals.append(f"用户数据清理未完成：{exc}")
 
         complete = not residuals
@@ -368,6 +385,7 @@ class UninstallLifecycleService:
                     details={"residual_count": len(residuals)},
                 )
             except Exception as exc:
+                logger.exception("Failed to append uninstall_completed history event")
                 residuals.append(f"无法记录 uninstall_completed：{exc}")
                 complete = False
                 message = "卸载未完全完成，请查看残留项。"
@@ -453,19 +471,18 @@ def read_bound_request(
         payload = source.read_bytes()
         if hashlib.sha256(payload).hexdigest() != _required_sha256(expected_sha256):
             raise UninstallError("卸载 request SHA-256 不匹配。")
-        raw = json.loads(payload.decode("utf-8"))
+        raw_object: object = json.loads(payload.decode("utf-8"))
     except UninstallError:
         raise
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         raise UninstallError(f"无法读取卸载 request：{exc}") from exc
-    if not isinstance(raw, dict):
-        raise UninstallError("卸载 request 根节点必须是 JSON 对象。")
+    raw = _object_mapping(raw_object, "卸载 request 根节点")
     request = _request_from_json(raw)
     if payload != canonical_request_bytes(request):
         raise UninstallError("卸载 request 不是规范化编码。")
     if not secrets.compare_digest(request.nonce, _required_nonce(nonce)):
         raise UninstallError("卸载 request nonce 不匹配。")
-    current = now.astimezone(timezone.utc)
+    current = now.astimezone(UTC)
     created = _timestamp(request.created_at)
     expires = _timestamp(request.expires_at)
     if expires <= created or expires - created > timedelta(seconds=UNINSTALL_REQUEST_TTL_SECONDS):
@@ -500,12 +517,14 @@ def clean_selected_user_data(
     selection: UninstallSelection,
 ) -> tuple[str, ...]:
     deleted: list[str] = []
-    if selection.delete_config:
-        if _remove_allowlisted_file(paths.data_root / "config.json", paths):
-            deleted.append("config")
-    if selection.delete_trusted_clients:
-        if _remove_allowlisted_file(paths.data_root / "credentials.json", paths):
-            deleted.append("trusted_clients")
+    if selection.delete_config and _remove_allowlisted_file(
+        paths.data_root / "config.json", paths
+    ):
+        deleted.append("config")
+    if selection.delete_trusted_clients and _remove_allowlisted_file(
+        paths.data_root / "credentials.json", paths
+    ):
+        deleted.append("trusted_clients")
     if selection.delete_logs:
         log_directory = validate_data_child(paths.log_directory, paths)
         if os.path.lexists(log_directory):
@@ -519,12 +538,12 @@ def clean_selected_user_data(
             try:
                 log_directory.rmdir()
             except OSError:
-                pass
+                logger.debug("LanDrop log directory remains non-empty", exc_info=True)
         deleted.append("logs")
     try:
         validate_data_child(paths.data_root, paths, allow_root=True).rmdir()
     except OSError:
-        pass
+        logger.debug("LanDrop data root remains non-empty", exc_info=True)
     return tuple(deleted)
 
 
@@ -670,8 +689,7 @@ def _request_from_json(raw: Mapping[str, object]) -> UninstallRequest:
     selection = raw.get("selection")
     if isinstance(original_pid, bool) or not isinstance(original_pid, int) or original_pid <= 0:
         raise UninstallError("卸载 request PID 无效。")
-    if not isinstance(selection, Mapping):
-        raise UninstallError("卸载 request 数据选项无效。")
+    selection_mapping = _object_mapping(selection, "卸载 request 数据选项")
     text_fields = ("created_at", "expires_at", "install_root", "version", "build_id")
     if any(not isinstance(raw.get(name), str) or not raw.get(name) for name in text_fields):
         raise UninstallError("卸载 request 文本字段无效。")
@@ -687,7 +705,7 @@ def _request_from_json(raw: Mapping[str, object]) -> UninstallRequest:
         product_id=PRODUCT_ID,
         version=str(raw["version"]),
         build_id=str(raw["build_id"]),
-        selection=UninstallSelection.from_mapping(selection),
+        selection=UninstallSelection.from_mapping(selection_mapping),
         source_uninstaller_sha256=_required_sha256(raw.get("source_uninstaller_sha256")),
     )
 
@@ -769,7 +787,7 @@ def _write_temp_log(directory: Path, event: str) -> None:
             output.write(
                 json.dumps(
                     {
-                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                        "timestamp": datetime.now(UTC).isoformat(),
                         "event": event,
                     },
                     ensure_ascii=False,
@@ -780,14 +798,24 @@ def _write_temp_log(directory: Path, event: str) -> None:
             output.flush()
             os.fsync(output.fileno())
     except OSError:
-        pass
+        logger.warning("Unable to append temporary uninstall log", exc_info=True)
 
 
 def _registered_size_fallback(paths: InstallPaths) -> int:
     try:
         return installed_size_kib(paths.install_root)
     except Exception:
+        logger.exception("Unable to calculate installed size; using safe fallback")
         return 1
+
+
+def _object_mapping(value: object, label: str) -> dict[str, object]:
+    if not isinstance(value, Mapping):
+        raise UninstallError(f"{label}必须是 JSON 对象。")
+    raw = cast(Mapping[object, object], value)
+    if not all(isinstance(key, str) for key in raw):
+        raise UninstallError(f"{label}字段名无效。")
+    return {key: item for key, item in raw.items() if isinstance(key, str)}
 
 
 def _required_nonce(value: object) -> str:
@@ -817,7 +845,7 @@ def _timestamp(value: str) -> datetime:
         raise UninstallError("卸载 request 时间格式无效。") from exc
     if parsed.tzinfo is None:
         raise UninstallError("卸载 request 时间必须包含时区。")
-    return parsed.astimezone(timezone.utc)
+    return parsed.astimezone(UTC)
 
 
 def _absolute(path: Path) -> Path:

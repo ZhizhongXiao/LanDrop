@@ -1,0 +1,19 @@
+{
+  "include": [
+    "app.py",
+    "desktop.py",
+    "landrop",
+    "scripts",
+    "setup.py",
+    "tests",
+    "uninstall.py"
+  ],
+  "exclude": [
+    ".test-tmp",
+    "build",
+    "dist"
+  ],
+  "pythonVersion": "3.12",
+  "typeCheckingMode": "strict",
+  "stubPath": "typings"
+}

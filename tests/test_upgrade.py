@@ -1,14 +1,14 @@
 from __future__ import annotations
 
-from pathlib import Path
 import os
 import shutil
-from typing import Callable
 import unittest
+from collections.abc import Callable
+from pathlib import Path
 
 from landrop.install_contract import InstallPaths, transaction_directory_name
-from landrop.install_state import InstallRecord, InstallationStateStore, TransactionRecord
-from landrop.payload_manifest import build_payload_manifest
+from landrop.install_state import InstallationStateStore, InstallRecord, TransactionRecord
+from landrop.payload_manifest import PayloadManifest, build_payload_manifest
 from landrop.system_integration import (
     IntegrationPlan,
     UpgradeIntegrationSnapshot,
@@ -16,9 +16,9 @@ from landrop.system_integration import (
 from landrop.upgrade import (
     UpgradeError,
     UpgradeService,
-    _remove_transaction_tree,
     compare_versions,
     inspect_setup_state,
+    remove_transaction_tree,
     retry_pending_cleanup,
 )
 from tests.support import temporary_directory
@@ -28,7 +28,8 @@ class _FakeLock:
     def __init__(self) -> None:
         self.owned = False
 
-    def acquire(self, _timeout: float) -> bool:
+    def acquire(self, timeout: float) -> bool:
+        del timeout
         self.owned = True
         return True
 
@@ -66,11 +67,12 @@ class _FakeUpgradeIntegration:
 
     def update_registration(
         self,
-        _snapshot: UpgradeIntegrationSnapshot,
+        snapshot: UpgradeIntegrationSnapshot,
         *,
         version: str,
         estimated_size_kib: int,
     ) -> None:
+        del snapshot
         self.update_calls += 1
         self.version = version
         if self.fail_at == "integration_write":
@@ -79,11 +81,12 @@ class _FakeUpgradeIntegration:
 
     def verify_upgrade(
         self,
-        _snapshot: UpgradeIntegrationSnapshot,
+        snapshot: UpgradeIntegrationSnapshot,
         *,
         version: str,
         estimated_size_kib: int,
     ) -> None:
+        del snapshot
         if self.fail_at == "integration_read":
             raise RuntimeError("integration_read")
         if self.version != version or self.size != estimated_size_kib:
@@ -142,7 +145,7 @@ class UpgradeTests(unittest.TestCase):
         )
         return store
 
-    def _payload_b(self, root: Path):
+    def _payload_b(self, root: Path) -> tuple[Path, PayloadManifest]:
         payload = root / "bundle" / "setup_payload"
         (payload / "app" / "_internal").mkdir(parents=True)
         (payload / "maintenance").mkdir(parents=True)
@@ -163,9 +166,14 @@ class UpgradeTests(unittest.TestCase):
         self_check: Callable[[Path], bool] | None = None,
         state_store: InstallationStateStore | None = None,
         checkpoint: Callable[[str], None] | None = None,
-        remove_tree=None,
+        remove_tree: Callable[[Path, InstallPaths], None] | None = None,
         running: bool = False,
-    ):
+    ) -> tuple[
+        UpgradeService,
+        InstallPaths,
+        InstallationStateStore,
+        _FakeUpgradeIntegration,
+    ]:
         paths = self._paths(root)
         default_store = self._prepare_a(paths)
         payload, manifest = self._payload_b(root)
@@ -178,7 +186,7 @@ class UpgradeTests(unittest.TestCase):
             integration=fake_integration,
             self_check=self_check or (lambda _path: True),
             state_store=chosen_store,
-            lifecycle_lock=_FakeLock(),  # type: ignore[arg-type]
+            lifecycle_lock=_FakeLock(),
             executable_running=lambda _path: running,
             checkpoint=checkpoint,
             remove_tree=remove_tree,
@@ -312,35 +320,47 @@ class UpgradeTests(unittest.TestCase):
                     fail_at=case if case.startswith("integration_") else ""
                 )
 
-                def checkpoint(point: str) -> None:
-                    if case == "staging_verify" and point == "before_staging_verify":
+                def checkpoint(
+                    point: str,
+                    *,
+                    active_case: str = case,
+                    active_root: Path = root,
+                ) -> None:
+                    if active_case == "staging_verify" and point == "before_staging_verify":
                         staging = next(
                             child
-                            for child in self._paths(root).install_root.iterdir()
+                            for child in self._paths(active_root).install_root.iterdir()
                             if child.name.startswith(".staging-")
                         )
                         (staging / "app" / "LanDrop.exe").write_bytes(b"tampered")
-                    if case == "app_to_rollback" and point == "before_app_to_rollback":
-                        raise RuntimeError(case)
+                    if active_case == "app_to_rollback" and point == "before_app_to_rollback":
+                        raise RuntimeError(active_case)
                     if (
-                        case == "maintenance_to_rollback"
+                        active_case == "maintenance_to_rollback"
                         and point == "before_maintenance_to_rollback"
                     ):
-                        raise RuntimeError(case)
-                    if case == "staging_to_app" and point == "before_staging_to_app":
-                        raise RuntimeError(case)
+                        raise RuntimeError(active_case)
+                    if active_case == "staging_to_app" and point == "before_staging_to_app":
+                        raise RuntimeError(active_case)
                     if (
-                        case == "staging_maintenance_to_live"
+                        active_case == "staging_maintenance_to_live"
                         and point == "before_staging_maintenance_to_live"
                     ):
-                        raise RuntimeError(case)
+                        raise RuntimeError(active_case)
+
+                def self_check(
+                    _path: Path,
+                    *,
+                    active_case: str = case,
+                ) -> bool:
+                    return active_case != "self_check"
 
                 paths = self._paths(root)
                 precreated_store = _FailCommitStore(paths) if case == "install_commit" else None
                 service, paths, store, integration = self._service(
                     root,
                     integration=integration,
-                    self_check=(lambda _path: case != "self_check"),
+                    self_check=self_check,
                     state_store=precreated_store,
                     checkpoint=checkpoint,
                 )
@@ -358,7 +378,7 @@ class UpgradeTests(unittest.TestCase):
             def fail_rollback_cleanup(path: Path, paths: InstallPaths) -> None:
                 if path.name.startswith(".rollback-"):
                     raise PermissionError("locked")
-                _remove_transaction_tree(path, paths)
+                remove_transaction_tree(path, paths)
 
             service, paths, store, integration = self._service(
                 root,
@@ -487,7 +507,7 @@ class UpgradeTests(unittest.TestCase):
                 ):
                     blocked_once["value"] = False
                     raise PermissionError("empty staging locked")
-                _remove_transaction_tree(target, paths)
+                remove_transaction_tree(target, paths)
 
             service, paths, store, integration = self._service(
                 root,
@@ -497,7 +517,9 @@ class UpgradeTests(unittest.TestCase):
 
             self.assertTrue(first.committed)
             self.assertFalse(first.verified)
-            self.assertEqual(store.read_install(required=True).version, "2.0.0")
+            installed = store.read_install(required=True)
+            assert installed is not None
+            self.assertEqual(installed.version, "2.0.0")
             self.assertTrue(paths.transaction_state_path.exists())
             self.assertEqual(paths.main_executable.read_bytes(), b"app-b")
 
@@ -515,7 +537,9 @@ class UpgradeTests(unittest.TestCase):
 
             self.assertTrue(restarted.verified)
             self.assertTrue(restarted.committed)
-            self.assertEqual(store.read_install(required=True).version, "2.0.0")
+            installed = store.read_install(required=True)
+            assert installed is not None
+            self.assertEqual(installed.version, "2.0.0")
             self.assertFalse(paths.transaction_state_path.exists())
             self.assertFalse(
                 any(child.name.startswith(".staging-") for child in paths.install_root.iterdir())
@@ -533,7 +557,7 @@ class UpgradeTests(unittest.TestCase):
             def fail_rollback_cleanup(path: Path, owned_paths: InstallPaths) -> None:
                 if path.name.startswith(".rollback-"):
                     raise PermissionError("locked")
-                _remove_transaction_tree(path, owned_paths)
+                remove_transaction_tree(path, owned_paths)
 
             service, paths, store, _integration = self._service(
                 root,
@@ -577,7 +601,7 @@ class UpgradeTests(unittest.TestCase):
             def remove_one(path: Path, owned_paths: InstallPaths) -> None:
                 if path.name == second:
                     raise PermissionError("still locked")
-                _remove_transaction_tree(path, owned_paths)
+                remove_transaction_tree(path, owned_paths)
 
             result = retry_pending_cleanup(
                 paths,
@@ -618,9 +642,7 @@ class UpgradeTests(unittest.TestCase):
                 assert record is not None
                 self.assertEqual((record.version, record.build_id), ("2.0.0", "build-b"))
                 self.assertEqual(paths.main_executable.read_bytes(), b"app-b")
-                self.assertFalse(
-                    (paths.app_directory / "_internal" / "a-only.sentinel").exists()
-                )
+                self.assertFalse((paths.app_directory / "_internal" / "a-only.sentinel").exists())
                 self.assertFalse(paths.transaction_state_path.exists())
                 self.assertEqual(integration.version, "2.0.0")
 

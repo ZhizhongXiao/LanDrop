@@ -1,0 +1,11 @@
+target-version = "py312"
+line-length = 100
+extend-exclude = [
+    ".test-tmp",
+    "build",
+    "dist",
+]
+
+[lint]
+# LanDrop 的用户可见文本使用中文标点；这些字符不是标识符混淆风险。
+allowed-confusables = ["，", "：", "；", "（", "）", "？", "–"]

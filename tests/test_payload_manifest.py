@@ -1,13 +1,13 @@
 from __future__ import annotations
 
-from dataclasses import replace
 import json
-from pathlib import Path
-from unittest.mock import patch
 import unittest
+from dataclasses import replace
+from pathlib import Path
+from typing import TypeGuard
+from unittest.mock import patch
 
 from landrop.payload_manifest import (
-    PayloadFile,
     PayloadManifestError,
     build_payload_manifest,
     read_payload_manifest,
@@ -15,6 +15,17 @@ from landrop.payload_manifest import (
     write_payload_manifest,
 )
 from tests.support import temporary_directory
+
+
+def _is_object_dict_list(value: object) -> TypeGuard[list[dict[str, object]]]:
+    return isinstance(value, list)
+
+
+def _manifest_files(payload: dict[str, object]) -> list[dict[str, object]]:
+    files = payload.get("files")
+    if not _is_object_dict_list(files):
+        raise TypeError("manifest files must be a list of objects")
+    return files
 
 
 class PayloadManifestTests(unittest.TestCase):
@@ -78,14 +89,20 @@ class PayloadManifestTests(unittest.TestCase):
             manifest_path = root / "payload-manifest.json"
 
             cases: list[dict[str, object]] = []
-            escaped = json.loads(json.dumps(base))
-            escaped["files"][0]["path"] = "../outside"  # type: ignore[index]
+            escaped: dict[str, object] = json.loads(json.dumps(base))
+            escaped_files = _manifest_files(escaped)
+            escaped_first = escaped_files[0]
+            escaped_first["path"] = "../outside"
             cases.append(escaped)
-            duplicate = json.loads(json.dumps(base))
-            duplicate["files"].append(dict(duplicate["files"][0]))  # type: ignore[union-attr,index]
+            duplicate: dict[str, object] = json.loads(json.dumps(base))
+            duplicate_files = _manifest_files(duplicate)
+            duplicate_first = duplicate_files[0]
+            duplicate_files.append(dict(duplicate_first))
             cases.append(duplicate)
-            unknown = json.loads(json.dumps(base))
-            unknown["files"][0]["mode"] = "executable"  # type: ignore[index]
+            unknown: dict[str, object] = json.loads(json.dumps(base))
+            unknown_files = _manifest_files(unknown)
+            unknown_first = unknown_files[0]
+            unknown_first["mode"] = "executable"
             cases.append(unknown)
 
             for data in cases:
@@ -97,12 +114,15 @@ class PayloadManifestTests(unittest.TestCase):
     def test_reparse_file_or_directory_is_rejected(self) -> None:
         with temporary_directory() as temporary:
             payload = self._payload(Path(temporary))
+
+            def is_resource(path: Path) -> bool:
+                return path.name == "资源"
+
             with patch(
                 "landrop.payload_manifest.is_reparse_object",
-                side_effect=lambda path: path.name == "资源",
-            ):
-                with self.assertRaisesRegex(PayloadManifestError, "reparse"):
-                    build_payload_manifest(payload, version="0.8.0", build_id="b")
+                side_effect=is_resource,
+            ), self.assertRaisesRegex(PayloadManifestError, "reparse"):
+                build_payload_manifest(payload, version="0.8.0", build_id="b")
 
     def test_manifest_identity_and_sorted_entries_are_strict(self) -> None:
         with temporary_directory() as temporary:

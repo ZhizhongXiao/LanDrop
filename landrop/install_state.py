@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field, replace
-from datetime import datetime, timezone
+import contextlib
 import json
 import os
-from pathlib import Path
 import secrets
-from typing import Callable, Mapping
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass, field, replace
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import cast
 
 from .install_contract import (
     MAIN_EXECUTABLE_RELATIVE,
@@ -21,7 +23,6 @@ from .install_contract import (
     validate_data_child,
     validate_install_child,
 )
-
 
 INSTALL_SCHEMA_VERSION = 1
 TRANSACTION_SCHEMA_VERSION = 1
@@ -124,7 +125,7 @@ class TransactionRecord:
     stage: str
     staging_directory: str
     rollback_directory: str | None = None
-    integration_snapshot: Mapping[str, object] = field(default_factory=dict)
+    integration_snapshot: Mapping[str, object] = field(default_factory=dict[str, object])
     schema_version: int = TRANSACTION_SCHEMA_VERSION
 
     @classmethod
@@ -268,14 +269,12 @@ class InstallationStateStore:
         try:
             if path.stat().st_size > _MAX_STATE_FILE_BYTES:
                 raise InstallStateError(f"{label} 超过 1 MiB 上限。")
-            payload = json.loads(path.read_text(encoding="utf-8"))
+            payload: object = json.loads(path.read_text(encoding="utf-8"))
         except InstallStateError:
             raise
         except (OSError, UnicodeError, json.JSONDecodeError) as exc:
             raise InstallStateError(f"无法读取 {label}：{exc}") from exc
-        if not isinstance(payload, dict):
-            raise InstallStateError(f"{label} 根节点必须是 JSON 对象。")
-        return payload
+        return _string_object_mapping(payload, f"{label} 根节点")
 
     def _write_json(self, path: Path, payload: Mapping[str, object]) -> None:
         self._validate_state_path(path)
@@ -304,7 +303,7 @@ class InstallHistoryLog:
     ) -> None:
         self.paths = paths or InstallPaths.from_environment()
         self.path = self.paths.install_history_path
-        self._now = now or (lambda: datetime.now(timezone.utc))
+        self._now = now or (lambda: datetime.now(UTC))
 
     def append(
         self,
@@ -322,7 +321,7 @@ class InstallHistoryLog:
         try:
             record: dict[str, object] = {
                 "schema_version": INSTALL_HISTORY_VERSION,
-                "timestamp": self._now().astimezone(timezone.utc).isoformat(),
+                "timestamp": self._now().astimezone(UTC).isoformat(),
                 "event": event,
                 "version": _required_text(version, "version"),
                 "result": _required_text(result, "result"),
@@ -380,10 +379,7 @@ def _install_record_from_json(raw: Mapping[str, object], paths: InstallPaths) ->
     app_relative = _required_text(raw["app_relative_path"], "app_relative_path")
     if app_relative != MAIN_EXECUTABLE_RELATIVE.as_posix():
         raise InstallStateError("install.json 主程序相对路径不符合固定布局。")
-    pending_raw = raw["pending_cleanup"]
-    if not isinstance(pending_raw, list) or any(not isinstance(item, str) for item in pending_raw):
-        raise InstallStateError("pending_cleanup 必须是字符串数组。")
-    pending = tuple(pending_raw)
+    pending = tuple(_string_list(raw["pending_cleanup"], "pending_cleanup"))
     if len(set(pending)) != len(pending):
         raise InstallStateError("pending_cleanup 不能包含重复目录。")
     if any(
@@ -464,9 +460,7 @@ def _transaction_record_from_json(raw: Mapping[str, object]) -> TransactionRecor
             raise InstallStateError(f"source_version 不能用于事务目录：{exc}") from exc
         if rollback != expected_rollback:
             raise InstallStateError("rollback_directory 不是受控 rollback 名称。")
-    snapshot = raw["integration_snapshot"]
-    if not isinstance(snapshot, dict):
-        raise InstallStateError("integration_snapshot 必须是 JSON 对象。")
+    snapshot = _string_object_mapping(raw["integration_snapshot"], "integration_snapshot")
     _validate_json_mapping(snapshot, "integration_snapshot")
     return TransactionRecord(
         transaction_id=transaction_id,
@@ -480,7 +474,7 @@ def _transaction_record_from_json(raw: Mapping[str, object]) -> TransactionRecor
         stage=stage,
         staging_directory=staging,
         rollback_directory=rollback,
-        integration_snapshot=dict(snapshot),
+        integration_snapshot=snapshot,
         schema_version=schema,
     )
 
@@ -495,10 +489,8 @@ def _atomic_write_json(path: Path, payload: Mapping[str, object]) -> None:
             os.fsync(output.fileno())
         os.replace(temporary, path)
     finally:
-        try:
+        with contextlib.suppress(OSError):
             temporary.unlink(missing_ok=True)
-        except OSError:
-            pass
 
 
 def _validate_transaction_update(
@@ -550,7 +542,7 @@ def _required_integer(value: object, label: str) -> int:
 def _required_timestamp(value: object, label: str) -> str:
     text = _required_text(value, label)
     try:
-        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        parsed = datetime.fromisoformat(text)
     except ValueError as exc:
         raise InstallStateError(f"{label} 不是有效 ISO-8601 时间。") from exc
     if parsed.tzinfo is None:
@@ -584,14 +576,33 @@ def _validate_json_mapping(value: Mapping[str, object], label: str) -> None:
 
 def _reject_sensitive_keys(value: object) -> None:
     if isinstance(value, Mapping):
-        for key, child in value.items():
+        mapping = cast(Mapping[object, object], value)
+        for key, child in mapping.items():
             lowered = str(key).casefold()
             if any(part in lowered for part in _SENSITIVE_KEY_PARTS):
                 raise InstallHistoryError(f"安装历史 details 包含敏感字段：{key}")
             _reject_sensitive_keys(child)
     elif isinstance(value, list):
-        for child in value:
+        for child in cast(list[object], value):
             _reject_sensitive_keys(child)
+
+
+def _string_object_mapping(value: object, label: str) -> dict[str, object]:
+    if not isinstance(value, dict):
+        raise InstallStateError(f"{label}必须是 JSON 对象。")
+    raw = cast(dict[object, object], value)
+    if any(not isinstance(key, str) for key in raw):
+        raise InstallStateError(f"{label}的键必须是字符串。")
+    return {cast(str, key): child for key, child in raw.items()}
+
+
+def _string_list(value: object, label: str) -> list[str]:
+    if not isinstance(value, list):
+        raise InstallStateError(f"{label} 必须是字符串数组。")
+    raw = cast(list[object], value)
+    if any(not isinstance(item, str) for item in raw):
+        raise InstallStateError(f"{label} 必须是字符串数组。")
+    return [cast(str, item) for item in raw]
 
 
 def _same_path(left: Path, right: Path) -> bool:
@@ -599,4 +610,4 @@ def _same_path(left: Path, right: Path) -> bool:
 
 
 def _utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()

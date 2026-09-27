@@ -23,6 +23,6 @@ def qr_png_data_uri(invitation_url: str) -> str:
     code.make(fit=True)
     image = code.make_image(fill_color="#0b5cab", back_color="#ffffff")
     output = BytesIO()
-    image.save(output, format="PNG")
+    image.save(output, "PNG")
     encoded = base64.b64encode(output.getvalue()).decode("ascii")
     return f"data:image/png;base64,{encoded}"

@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import logging
 import queue
 import threading
 import time
-from typing import Callable, Protocol
+from collections.abc import Callable
+from dataclasses import dataclass
+from typing import Protocol
 
-from .service import ServiceController, ServiceSnapshot
+from .service import ServiceSnapshot
+
+logger = logging.getLogger(__name__)
 
 
 AUTOMATIC_STOP_REASONS = frozenset(
@@ -43,6 +47,28 @@ class ToastActions(Protocol):
     def clear_all(self) -> None: ...
 
 
+class ServiceActions(Protocol):
+    def snapshot(self) -> ServiceSnapshot: ...
+
+    def apply_expected_action(
+        self,
+        action: str,
+        *,
+        session_id: str,
+        deadline_revision: int,
+    ) -> tuple[bool, ServiceSnapshot]: ...
+
+    def start(
+        self,
+        shared_directory: str,
+        receive_directory: str,
+        max_upload_mb: int = 1000,
+        interface_selector: str | None = None,
+    ) -> ServiceSnapshot: ...
+
+    def stop(self, reason: str) -> ServiceSnapshot: ...
+
+
 @dataclass(frozen=True, slots=True)
 class ActionResult:
     applied: bool
@@ -55,7 +81,7 @@ class ActionCoordinator:
 
     def __init__(
         self,
-        controller: ServiceController,
+        controller: ServiceActions,
         window: WindowActions,
         *,
         tray: TrayActions | None = None,
@@ -128,7 +154,7 @@ class ActionCoordinator:
                         try:
                             send_stopped(state.stop_reason)
                         except Exception:
-                            pass
+                            logger.warning("发送停服通知失败", exc_info=True)
                     previous_key = key
                 if (
                     state.running
@@ -138,7 +164,7 @@ class ActionCoordinator:
                     try:
                         send_reminder(state.session_id, state.deadline_revision)
                     except Exception:
-                        pass
+                        logger.warning("发送到期提醒失败", exc_info=True)
                 time.sleep(0.25)
 
         self._reminder_thread = threading.Thread(
@@ -264,14 +290,14 @@ class ActionCoordinator:
             try:
                 self._toasts.clear_actionable()
             except Exception:
-                pass
+                logger.warning("清除可操作通知失败", exc_info=True)
 
     def _clear_all_toasts(self) -> None:
         if self._toasts is not None:
             try:
                 self._toasts.clear_all()
             except Exception:
-                pass
+                logger.warning("清除通知失败", exc_info=True)
 
     def _publish_state(self, state: ServiceSnapshot) -> None:
         if self._on_state_changed is not None:
@@ -279,7 +305,7 @@ class ActionCoordinator:
                 self._on_state_changed(state)
             except Exception:
                 # Presentation failures must not terminate lifecycle monitoring.
-                pass
+                logger.warning("发布界面状态失败", exc_info=True)
 
     def _run_gui_actions(self) -> None:
         while True:
@@ -290,4 +316,4 @@ class ActionCoordinator:
                 callback()
             except Exception:
                 # UI presentation errors must not change the service lifecycle.
-                pass
+                logger.warning("执行界面操作失败", exc_info=True)

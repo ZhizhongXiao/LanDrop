@@ -2,15 +2,17 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from datetime import datetime
 import html
 import json
-from pathlib import Path
 import re
 import secrets
 import threading
-from typing import Any, BinaryIO, Iterable, Iterator
+from collections.abc import Iterable, Iterator
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from pathlib import Path
+from types import TracebackType
+from typing import BinaryIO, Protocol, cast
 from urllib.parse import quote, unquote_to_bytes
 
 from bottle import Bottle, HTTPResponse, redirect, request, response, static_file
@@ -34,11 +36,21 @@ from .storage import (
 )
 from .trust import CredentialStore, TrustedClient
 
-
 COOKIE_NAME = "landrop_trust"
 PAIRING_ATTEMPT_LIMIT = 5
 MULTIPART_OVERHEAD_ALLOWANCE = 2 * 1024 * 1024
 SMALL_FORM_LIMIT = 4096
+
+type WsgiExceptionInfo = tuple[type[BaseException], BaseException, TracebackType]
+
+
+class StartResponse(Protocol):
+    def __call__(
+        self,
+        status: str,
+        headers: list[tuple[str, str]],
+        exc_info: WsgiExceptionInfo | None = None,
+    ) -> object: ...
 
 
 class UploadInterruptedError(StorageError):
@@ -54,7 +66,7 @@ class WebConfig:
     lifecycle: SessionLifecycle | None = None
 
 
-def create_application(config: WebConfig) -> tuple[Any, str]:
+def create_application(config: WebConfig) -> tuple[_TrackedApplication, str]:
     app = Bottle()
     lifecycle = config.lifecycle or SessionLifecycle()
     csrf_token = secrets.token_urlsafe(24)
@@ -155,7 +167,7 @@ def create_application(config: WebConfig) -> tuple[Any, str]:
         )
 
     @app.get("/")
-    def index() -> str:
+    def index() -> str | HTTPResponse:
         expired = expired_response()
         if expired is not None:
             return expired
@@ -163,28 +175,19 @@ def create_application(config: WebConfig) -> tuple[Any, str]:
         if client is None:
             return _pairing_page()
 
-        rows = []
+        rows: list[str] = []
         for item in list_shared_files(config.shared_directory):
             url = "/prepare-download/" + quote(item.relative_path, safe="/")
             ticket_url = "/start-download/" + quote(item.relative_path, safe="/")
             escaped_name = html.escape(item.relative_path)
             rows.append(
                 "<li class=\"file-row file-grid\">"
-                "<input class=\"download-choice\" type=\"checkbox\" data-ticket-url=\"{}\" "
-                "aria-label=\"选择 {}\">"
-                "<a class=\"file-link\" href=\"{}\" data-ticket-url=\"{}\">{}</a>"
-                "<span class=\"file-modified\">{}</span>"
-                "<span class=\"file-type\">{}</span>"
-                "<span class=\"file-size\">{}</span></li>".format(
-                    html.escape(ticket_url, quote=True),
-                    escaped_name,
-                    html.escape(url, quote=True),
-                    html.escape(ticket_url, quote=True),
-                    escaped_name,
-                    html.escape(_format_modified_time(item.modified_at)),
-                    html.escape(_file_type_label(item.relative_path)),
-                    html.escape(format_size(item.size)),
-                )
+                f"<input class=\"download-choice\" type=\"checkbox\" data-ticket-url=\"{html.escape(ticket_url, quote=True)}\" "
+                f"aria-label=\"选择 {escaped_name}\">"
+                f"<a class=\"file-link\" href=\"{html.escape(url, quote=True)}\" data-ticket-url=\"{html.escape(ticket_url, quote=True)}\">{escaped_name}</a>"
+                f"<span class=\"file-modified\">{html.escape(_format_modified_time(item.modified_at))}</span>"
+                f"<span class=\"file-type\">{html.escape(_file_type_label(item.relative_path))}</span>"
+                f"<span class=\"file-size\">{html.escape(format_size(item.size))}</span></li>"
             )
         listing = "".join(rows) or '<li class="empty"><em>当前没有可供下载的文件</em></li>'
         body = f"""
@@ -854,7 +857,8 @@ def create_application(config: WebConfig) -> tuple[Any, str]:
         except SessionExpiredError:
             return expired_response() or _html_response(_error_page(503, "会话已到期。"), 503)
         try:
-            source = _ContentLengthReader(request.environ["wsgi.input"], content_length)
+            wsgi_input = cast(BinaryIO, request.environ["wsgi.input"])
+            source = _ContentLengthReader(wsgi_input, content_length)
             result = save_upload(
                 source,
                 raw_filename,
@@ -1033,22 +1037,26 @@ class _TrackedApplication:
         self._application = application
         self._lifecycle = lifecycle
 
-    def __call__(self, environ: dict[str, Any], start_response: Any) -> Iterable[bytes]:
+    def __call__(
+        self,
+        environ: dict[str, object],
+        start_response: StartResponse,
+    ) -> Iterable[bytes]:
         iterable = self._application(environ, start_response)
         transfer = environ.pop("landrop.transfer", None)
         if not isinstance(transfer, TransferHandle):
             return iterable
-        return _TrackedIterable(iterable, transfer)
+        return TrackedIterable(iterable, transfer)
 
 
-class _TrackedIterable(Iterator[bytes]):
+class TrackedIterable(Iterator[bytes]):
     def __init__(self, iterable: Iterable[bytes], transfer: TransferHandle) -> None:
         self._iterable = iterable
         self._iterator = iter(iterable)
         self._transfer = transfer
         self._finished = False
 
-    def __iter__(self) -> _TrackedIterable:
+    def __iter__(self) -> TrackedIterable:
         return self
 
     def __next__(self) -> bytes:
@@ -1067,7 +1075,7 @@ class _TrackedIterable(Iterator[bytes]):
             close = getattr(self._iterable, "close", None)
             if close is not None:
                 close()
-            raise StopIteration
+            raise StopIteration from exc
         except Exception:
             self._finished = True
             self._transfer.fail("server_error")
@@ -1179,7 +1187,7 @@ def _page(title: str, body: str) -> str:
 
 
 def _format_modified_time(timestamp: float) -> str:
-    return datetime.fromtimestamp(timestamp).strftime("%Y/%m/%d %H:%M")
+    return datetime.fromtimestamp(timestamp, UTC).astimezone().strftime("%Y/%m/%d %H:%M")
 
 
 def _file_type_label(relative_path: str) -> str:

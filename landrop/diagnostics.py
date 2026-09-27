@@ -2,20 +2,21 @@
 
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timezone
 import json
 import os
-from pathlib import Path
 import subprocess
 import sys
-from typing import Any
+from concurrent.futures import ThreadPoolExecutor
+from datetime import UTC, datetime
+from pathlib import Path
 
 from .network import POWERSHELL
 
-
 NETWORK_DETAILS_TIMEOUT_SECONDS = 10
 FIREWALL_TIMEOUT_SECONDS = 10
+
+type JsonValue = bool | int | float | str | list[JsonValue] | dict[str, JsonValue] | None
+type JsonObject = dict[str, JsonValue]
 
 _NETWORK_DETAILS_SCRIPT = r"""
 [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
@@ -122,7 +123,7 @@ def inspect_system(port: int = 8000, program: str | None = None) -> dict[str, ob
             if complete
             else "部分诊断无法确定，请查看具体项目。"
         ),
-        "updated_at": datetime.now(timezone.utc).isoformat(),
+        "updated_at": datetime.now(UTC).isoformat(),
         "network": network,
         "firewall": firewall,
     }
@@ -135,9 +136,8 @@ def inspect_network_details() -> dict[str, object]:
     )
     if error:
         return {"status": "unknown", "message": error, "adapters": []}
-    adapters = result.get("adapters", []) if isinstance(result, dict) else []
-    if isinstance(adapters, dict):
-        adapters = [adapters]
+    result_object = result if isinstance(result, dict) else {}
+    adapters = _object_list(result_object.get("adapters"))
     return {"status": "ready", "message": "网络详细信息已更新。", "adapters": adapters}
 
 
@@ -150,18 +150,14 @@ def inspect_firewall(port: int, program: str) -> dict[str, object]:
         return _unknown_firewall(error)
     if not isinstance(result, dict):
         return _unknown_firewall("Windows 防火墙查询返回了无法识别的数据。")
-    return _classify_firewall(result, port, program)
+    return classify_firewall(result, port, program)
 
 
-def _classify_firewall(
-    result: dict[str, Any], port: int, program: str
+def classify_firewall(
+    result: JsonObject, port: int, program: str
 ) -> dict[str, object]:
-    profiles = result.get("profiles") or []
-    rules = result.get("rules") or []
-    if isinstance(profiles, dict):
-        profiles = [profiles]
-    if isinstance(rules, dict):
-        rules = [rules]
+    profiles = _object_list(result.get("profiles"))
+    rules = _object_list(result.get("rules"))
 
     target_program = _normalized_program(program)
     evidence: list[dict[str, object]] = []
@@ -171,12 +167,12 @@ def _classify_firewall(
     relevant_blocks = 0
 
     for rule in rules:
-        if not isinstance(rule, dict) or not _private_profile_applies(rule.get("profile")):
+        if not _private_profile_applies(rule.get("profile")):
             continue
         protocol = str(rule.get("protocol") or "Any")
         if protocol.casefold() not in {"tcp", "6", "any"}:
             continue
-        port_scope = _port_scope(str(rule.get("local_port") or "Any"), port)
+        port_scope = port_scope_for(str(rule.get("local_port") or "Any"), port)
         program_value = str(rule.get("program") or "Any")
         normalized_program = _normalized_program(program_value)
         program_match = bool(target_program) and normalized_program == target_program
@@ -215,14 +211,13 @@ def _classify_firewall(
                 }
             )
 
-    private_profile = next(
+    private_profile: JsonObject | None = next(
         (
             profile
             for profile in profiles
-            if isinstance(profile, dict)
-            and str(profile.get("name") or "").casefold() == "private"
+            if str(profile.get("name") or "").casefold() == "private"
         ),
-        {},
+        None,
     )
     private_enabled = private_profile.get("enabled") if private_profile else None
     if relevant_blocks:
@@ -243,7 +238,11 @@ def _classify_firewall(
         "level": level,
         "message": message,
         "private_profile_enabled": private_enabled,
-        "private_default_inbound": private_profile.get("default_inbound", "Unknown"),
+        "private_default_inbound": (
+            private_profile.get("default_inbound", "Unknown")
+            if private_profile
+            else "Unknown"
+        ),
         "exact_port_allow": exact_port_allow,
         "program_allow": program_allow,
         "broad_allow": broad_allow,
@@ -282,7 +281,7 @@ def _normalized_program(value: str) -> str:
         return text.casefold()
 
 
-def _port_scope(value: str, target: int) -> str:
+def port_scope_for(value: str, target: int) -> str:
     text = value.strip()
     if text.casefold() in {"any", "*"}:
         return "any"
@@ -305,7 +304,7 @@ def _run_powershell_json(
     script: str,
     *,
     timeout: float,
-) -> tuple[object, str]:
+) -> tuple[JsonValue, str]:
     if os.name != "nt" or not os.path.isfile(POWERSHELL):
         return {}, "当前环境无法运行 Windows PowerShell 诊断。"
     creation_flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
@@ -336,6 +335,15 @@ def _run_powershell_json(
         detail = (completed.stderr or completed.stdout or "").strip()
         return {}, detail or "诊断查询未成功。"
     try:
-        return json.loads(completed.stdout.strip() or "{}"), ""
+        parsed: JsonValue = json.loads(completed.stdout.strip() or "{}")
+        return parsed, ""
     except json.JSONDecodeError:
         return {}, "诊断查询返回了无法解析的数据。"
+
+
+def _object_list(value: JsonValue | None) -> list[JsonObject]:
+    if isinstance(value, dict):
+        return [value]
+    if not isinstance(value, list):
+        return []
+    return [item for item in value if isinstance(item, dict)]

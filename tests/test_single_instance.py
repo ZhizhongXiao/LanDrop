@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import os
-from pathlib import Path
 import threading
 import unittest
 import uuid
+from pathlib import Path
+
+from support import temporary_directory
 
 from landrop.single_instance import DesktopSingleInstance
-from support import temporary_directory
 
 
 @unittest.skipUnless(os.name == "nt", "Windows-only single-instance behavior")

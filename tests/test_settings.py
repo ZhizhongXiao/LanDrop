@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
 import unittest
+from pathlib import Path
+
+from support import temporary_directory
 
 from landrop.settings import AppSettings, SettingsStore
-from support import temporary_directory
 
 
 class SettingsStoreTests(unittest.TestCase):

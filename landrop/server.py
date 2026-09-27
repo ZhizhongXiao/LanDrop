@@ -2,19 +2,20 @@
 
 from __future__ import annotations
 
+import contextlib
 import logging
-import sys
 import socket
+import sys
 import threading
 from socketserver import TCPServer, ThreadingMixIn
 from typing import Any
 from wsgiref.simple_server import WSGIRequestHandler, WSGIServer, make_server
 
-
 logger = logging.getLogger("landrop.server")
 
 
 SHUTDOWN_POLL_INTERVAL_SECONDS = 0.1
+type ServerRequest = socket.socket | tuple[bytes, socket.socket]
 
 
 class LanDropRequestHandler(WSGIRequestHandler):
@@ -25,8 +26,8 @@ class LanDropRequestHandler(WSGIRequestHandler):
     def address_string(self) -> str:
         return self.client_address[0]
 
-    def log_message(self, message_format: str, *args: object) -> None:
-        logger.info("[请求] %s - %s", self.client_address[0], message_format % args)
+    def log_message(self, format: str, *args: object) -> None:
+        logger.info("[请求] %s - %s", self.client_address[0], format % args)
 
 
 class ThreadedWSGIServer(ThreadingMixIn, WSGIServer):
@@ -35,7 +36,7 @@ class ThreadedWSGIServer(ThreadingMixIn, WSGIServer):
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
-        self._connections: set[Any] = set()
+        self._connections: set[ServerRequest] = set()
         self._connections_lock = threading.Lock()
 
     def server_bind(self) -> None:
@@ -51,12 +52,12 @@ class ThreadedWSGIServer(ThreadingMixIn, WSGIServer):
         self.server_port = int(port)
         self.setup_environ()
 
-    def process_request(self, request: Any, client_address: tuple[str, int]) -> None:
+    def process_request(self, request: ServerRequest, client_address: tuple[str, int]) -> None:
         with self._connections_lock:
             self._connections.add(request)
         super().process_request(request, client_address)
 
-    def shutdown_request(self, request: Any) -> None:
+    def shutdown_request(self, request: ServerRequest) -> None:
         try:
             super().shutdown_request(request)
         finally:
@@ -66,17 +67,14 @@ class ThreadedWSGIServer(ThreadingMixIn, WSGIServer):
     def close_active_connections(self) -> None:
         with self._connections_lock:
             connections = tuple(self._connections)
-        for connection in connections:
-            try:
+        for request in connections:
+            connection = request if isinstance(request, socket.socket) else request[1]
+            with contextlib.suppress(OSError):
                 connection.shutdown(socket.SHUT_RDWR)
-            except OSError:
-                pass
-            try:
+            with contextlib.suppress(OSError):
                 connection.close()
-            except OSError:
-                pass
 
-    def handle_error(self, request: object, client_address: tuple[str, int]) -> None:
+    def handle_error(self, request: ServerRequest, client_address: tuple[str, int]) -> None:
         error = sys.exc_info()[1]
         if isinstance(
             error,

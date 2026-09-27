@@ -6,7 +6,6 @@ from pathlib import Path
 
 from PIL import Image
 
-
 ROOT = Path(__file__).resolve().parents[1]
 ASSETS = ROOT / "assets"
 SOURCE_PATH = ASSETS / "LanDrop-icon-source.png"
@@ -18,24 +17,32 @@ ICON_SIZES = (16, 20, 24, 32, 40, 48, 64, 128, 256)
 def _remove_black_matte(source: Image.Image) -> Image.Image:
     """Recover transparency from the black matte around the rounded tile."""
     rgba = source.convert("RGBA")
-    pixels = rgba.load()
     for y in range(rgba.height):
         for x in range(rgba.width):
-            red, green, blue, _alpha = pixels[x, y]
+            pixel = rgba.getpixel((x, y))
+            if not (
+                isinstance(pixel, tuple)
+                and len(pixel) == 4
+            ):
+                raise TypeError("RGBA 图标像素格式无效。")
+            red, green, blue, _alpha = pixel
             peak = max(red, green, blue)
             if peak <= 3:
-                pixels[x, y] = (0, 0, 0, 0)
+                rgba.putpixel((x, y), (0, 0, 0, 0))
                 continue
             if peak >= 224:
-                pixels[x, y] = (red, green, blue, 255)
+                rgba.putpixel((x, y), (red, green, blue, 255))
                 continue
 
             alpha = round((peak - 3) * 255 / 221)
-            pixels[x, y] = (
-                min(255, round(red * 255 / alpha)),
-                min(255, round(green * 255 / alpha)),
-                min(255, round(blue * 255 / alpha)),
-                alpha,
+            rgba.putpixel(
+                (x, y),
+                (
+                    min(255, round(red * 255 / alpha)),
+                    min(255, round(green * 255 / alpha)),
+                    min(255, round(blue * 255 / alpha)),
+                    alpha,
+                ),
             )
     return rgba
 
@@ -46,9 +53,14 @@ def normalized_source(size: int = 512) -> Image.Image:
         source = _remove_black_matte(opened)
     # Generated antialiasing can leave nearly invisible alpha noise around the
     # canvas. Ignore it so the visible mark, not the noise, determines scaling.
-    visible_alpha = source.getchannel("A").point(
-        lambda value: 255 if value >= 24 else 0
-    )
+    alpha_channel = source.getchannel("A")
+    visible_alpha = Image.new("L", alpha_channel.size, 0)
+    for y in range(alpha_channel.height):
+        for x in range(alpha_channel.width):
+            alpha = alpha_channel.getpixel((x, y))
+            if not isinstance(alpha, int):
+                raise TypeError("图标透明通道格式无效。")
+            visible_alpha.putpixel((x, y), 255 if alpha >= 24 else 0)
     alpha_bounds = visible_alpha.getbbox()
     if alpha_bounds is None:
         raise ValueError(f"图标源图为空：{SOURCE_PATH}")

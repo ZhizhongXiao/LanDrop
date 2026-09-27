@@ -1,17 +1,18 @@
 from __future__ import annotations
 
 import os
-from pathlib import Path
 import subprocess
 import unittest
+from pathlib import Path
+from typing import Self
 
 from landrop.install_contract import (
     APP_USER_MODEL_ID,
-    InstallPaths,
     RUN_KEY,
     RUN_VALUE_NAME,
     STARTUP_APPROVED_RUN_KEY,
     UNINSTALL_KEY,
+    InstallPaths,
 )
 from landrop.system_integration import (
     IntegrationPlan,
@@ -24,11 +25,11 @@ from tests.support import temporary_directory
 
 
 class _Key:
-    def __init__(self, backend: "_Registry", path: str) -> None:
+    def __init__(self, backend: _Registry, path: str) -> None:
         self.backend = backend
         self.path = path
 
-    def __enter__(self) -> "_Key":
+    def __enter__(self) -> Self:
         return self
 
     def __exit__(self, *_args: object) -> None:
@@ -47,36 +48,36 @@ class _Registry:
     def __init__(self) -> None:
         self.keys: dict[str, dict[str, tuple[object, int]]] = {}
 
-    def OpenKey(self, _root: object, path: str, *_args: object) -> _Key:  # noqa: N802
+    def OpenKey(self, _root: object, path: str, *_args: object) -> _Key:
         if path not in self.keys:
             raise FileNotFoundError(path)
         return _Key(self, path)
 
-    def CreateKeyEx(self, _root: object, path: str, *_args: object) -> _Key:  # noqa: N802
+    def CreateKeyEx(self, _root: object, path: str, *_args: object) -> _Key:
         self.keys.setdefault(path, {})
         return _Key(self, path)
 
-    def QueryValueEx(self, key: _Key, name: str):  # noqa: N802
+    def QueryValueEx(self, key: _Key, name: str):
         try:
             return self.keys[key.path][name]
         except KeyError as exc:
             raise FileNotFoundError(name) from exc
 
-    def SetValueEx(self, key: _Key, name: str, _reserved: int, kind: int, value: object):  # noqa: N802
+    def SetValueEx(self, key: _Key, name: str, _reserved: int, kind: int, value: object):
         self.keys[key.path][name] = (value, kind)
 
-    def QueryInfoKey(self, key: _Key):  # noqa: N802
+    def QueryInfoKey(self, key: _Key):
         return 0, len(self.keys[key.path]), 0
 
-    def EnumValue(self, key: _Key, index: int):  # noqa: N802
+    def EnumValue(self, key: _Key, index: int):
         name = sorted(self.keys[key.path])[index]
         value, kind = self.keys[key.path][name]
         return name, value, kind
 
-    def DeleteValue(self, key: _Key, name: str):  # noqa: N802
+    def DeleteValue(self, key: _Key, name: str):
         del self.keys[key.path][name]
 
-    def DeleteKey(self, _root: object, path: str):  # noqa: N802
+    def DeleteKey(self, _root: object, path: str):
         if self.keys[path]:
             raise OSError("not empty")
         del self.keys[path]

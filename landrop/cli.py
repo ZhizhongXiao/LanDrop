@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import argparse
 import logging
-from pathlib import Path
 import sys
 import time
+from pathlib import Path
 
 from .network import (
     NetworkDiscoveryError,
@@ -21,7 +21,6 @@ from .settings import (
     default_data_directory,
 )
 from .trust import CredentialStore
-
 
 DEFAULT_PORT = 8000
 DEFAULT_DATA_DIRECTORY = default_data_directory()

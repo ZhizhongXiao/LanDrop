@@ -8,30 +8,23 @@ firewall diagnostic because that path has its own regression coverage.
 from __future__ import annotations
 
 import argparse
-from contextlib import closing
-from pathlib import Path
+import logging
 import socket
 import statistics
 import sys
 import tempfile
 import threading
 import time
-from typing import Any
+from contextlib import closing
+from pathlib import Path
+from typing import TYPE_CHECKING
 from urllib.request import Request, urlopen
 
+if TYPE_CHECKING:
+    from landrop.network import LanInterface
+    from landrop.service import ServiceController, ServiceSnapshot
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
-
-from landrop.network import (  # noqa: E402
-    LanInterface,
-    discover_interfaces,
-    select_interface,
-    usable_lan_interfaces,
-)
-from landrop.service import ServiceController, ServiceSnapshot  # noqa: E402
-from landrop.trust import CredentialStore  # noqa: E402
+logger = logging.getLogger(__name__)
 
 
 def _ready_diagnostics(_port: int, _program: str) -> dict[str, object]:
@@ -48,15 +41,9 @@ def _ready_diagnostics(_port: int, _program: str) -> dict[str, object]:
     }
 
 
-def _private_interfaces() -> list[LanInterface]:
-    return [
-        item
-        for item in usable_lan_interfaces(discover_interfaces())
-        if item.is_private_profile
-    ]
-
-
 def _choose_interface(selector: str | None) -> LanInterface:
+    from landrop.network import discover_interfaces, select_interface, usable_lan_interfaces
+
     interfaces = discover_interfaces()
     if selector:
         return select_interface(interfaces, selector)
@@ -97,7 +84,7 @@ def _wait_port(port: int, expected: bool, timeout: float = 3.0) -> None:
 
 def _request_root(url: str) -> None:
     request = Request(url, method="HEAD")
-    with urlopen(request, timeout=3) as response:  # noqa: S310 - loopback only
+    with urlopen(request, timeout=3) as response:
         if response.status != 200:
             raise RuntimeError(f"本机 HEAD 验证返回 HTTP {response.status}")
 
@@ -125,6 +112,9 @@ def _controller(
     duration_seconds: float = 300,
     grace_seconds: float = 60,
 ) -> ServiceController:
+    from landrop.service import ServiceController
+    from landrop.trust import CredentialStore
+
     return ServiceController(
         CredentialStore(data_directory),
         duration_seconds=duration_seconds,
@@ -278,6 +268,9 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main() -> int:
+    project_root = Path(__file__).resolve().parents[1]
+    if str(project_root) not in sys.path:
+        sys.path.insert(0, str(project_root))
     args = build_parser().parse_args()
     if args.cycles < 1 or args.resets < 0 or args.expiry_cycles < 1:
         raise SystemExit("cycles/expiry-cycles 必须大于 0，resets 不能小于 0。")
@@ -290,6 +283,7 @@ def main() -> int:
             selector=args.interface,
         )
     except Exception as exc:
+        logger.exception("Phase 7 stability acceptance failed")
         print(f"稳定性验收失败：{exc}", file=sys.stderr)
         return 1
     return 0

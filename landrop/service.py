@@ -2,19 +2,20 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, replace
-from datetime import datetime, timezone
 import errno
 import logging
-from pathlib import Path
 import sys
 import threading
+from collections.abc import Callable
+from dataclasses import asdict, dataclass, replace
+from datetime import UTC, datetime
+from pathlib import Path
 from time import monotonic, perf_counter
-from typing import Any, Callable
+from typing import Any, cast
 
 from .diagnostics import inspect_system
-from .lifecycle import SessionExpiredError, SessionLifecycle
 from .events import SessionEventLog
+from .lifecycle import SessionExpiredError, SessionLifecycle
 from .network import (
     EndpointBaseline,
     EndpointChecker,
@@ -26,7 +27,6 @@ from .qr_invite import qr_png_data_uri
 from .server import ServerGroup
 from .trust import CredentialStore
 from .web import WebConfig, create_application
-
 
 logger = logging.getLogger("landrop.service")
 
@@ -233,7 +233,7 @@ class ServiceController:
 
             self._server = server
             self._lifecycle = lifecycle
-            self._started_at = datetime.now(timezone.utc).isoformat()
+            self._started_at = datetime.now(UTC).isoformat()
             self._snapshot = ServiceSnapshot(
                 running=True,
                 phase="running",
@@ -422,7 +422,7 @@ class ServiceController:
             current = dict(self._snapshot.diagnostics or _empty_diagnostics())
             current["status"] = "checking"
             current["message"] = "正在重新检测网络与防火墙……"
-            firewall = dict(current.get("firewall") or {})
+            firewall = _object_dict(current.get("firewall"))
             firewall.update({"status": "checking", "message": "检测中"})
             current["firewall"] = firewall
             self._snapshot = replace(self._snapshot, diagnostics=current)
@@ -473,7 +473,7 @@ class ServiceController:
         error = ""
         try:
             server.serve_forever()
-        except Exception as exc:
+        except (OSError, RuntimeError) as exc:
             error = f"服务意外停止：{exc}"
         finally:
             server.close()
@@ -649,25 +649,26 @@ class ServiceController:
         if refresh_interfaces:
             try:
                 interfaces = self._discover()
-            except Exception as exc:
+            except (OSError, RuntimeError) as exc:
                 interfaces = None
                 discovery_error = str(exc)
+        result: dict[str, object]
         try:
             result = self._diagnostics_factory(self._port, sys.executable)
-        except Exception as exc:
+        except (OSError, RuntimeError) as exc:
             result = {
                 "status": "unknown",
                 "message": f"深度诊断失败：{exc}",
-                "network": {"status": "unknown", "adapters": []},
+                "network": {"status": "unknown", "adapters": list[object]()},
                 "firewall": {
                     "status": "unknown",
                     "level": "unknown",
                     "message": f"防火墙诊断失败：{exc}",
-                    "evidence": [],
+                    "evidence": list[object](),
                 },
             }
         diagnostics = dict(result)
-        network = dict(diagnostics.get("network") or {})
+        network = _object_dict(diagnostics.get("network"))
         if interfaces is not None:
             network["interfaces"] = [_interface_diagnostic(item) for item in interfaces]
         if discovery_error:
@@ -835,7 +836,7 @@ def _observation_stop_reason(observation: Any, *, include_category: bool) -> str
 def _interface_diagnostic(interface: Any) -> dict[str, object]:
     converter = getattr(interface, "to_diagnostic_dict", None)
     if callable(converter):
-        return converter()
+        return _object_dict(converter())
     return {
         "alias": str(getattr(interface, "alias", "")),
         "interface_index": int(getattr(interface, "interface_index", 0)),
@@ -859,6 +860,17 @@ def _empty_diagnostics() -> dict[str, object]:
             "message": "尚未检测。",
             "evidence": [],
         },
+    }
+
+
+def _object_dict(value: object) -> dict[str, object]:
+    if not isinstance(value, dict):
+        return {}
+    raw = cast(dict[object, object], value)
+    return {
+        key: child
+        for key, child in raw.items()
+        if isinstance(key, str)
     }
 
 

@@ -2,38 +2,48 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import os
-from pathlib import Path
 import shutil
 import subprocess
-from typing import Callable
+from collections.abc import Callable
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Protocol
 
 from .install_contract import (
     InstallPaths,
+    is_reparse_object,
     new_transaction_id,
     transaction_directory_name,
     validate_install_child,
     validate_transaction_directory,
-    is_reparse_object,
 )
 from .install_lock import InstallLifecycleLock
 from .install_state import (
+    InstallationStateStore,
+    InstallHistoryError,
     InstallHistoryLog,
     InstallRecord,
-    InstallationStateStore,
+    InstallStateError,
     TransactionRecord,
 )
-from .payload_manifest import PayloadManifest, verify_payload
+from .payload_manifest import PayloadManifest, PayloadManifestError, verify_payload
 from .system_integration import (
     FirstInstallIntegration,
     IntegrationPlan,
+    SystemIntegrationError,
     installed_size_kib,
 )
 
 
 class FirstInstallError(RuntimeError):
     """The first-install transaction could not be completed safely."""
+
+
+class _InstallLifecycleActions(Protocol):
+    def acquire(self, timeout: float) -> bool: ...
+
+    def close(self) -> None: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -74,7 +84,7 @@ class FirstInstallService:
         self_check: Callable[[Path], bool] | None = None,
         state_store: InstallationStateStore | None = None,
         history: InstallHistoryLog | None = None,
-        lifecycle_lock: InstallLifecycleLock | None = None,
+        lifecycle_lock: _InstallLifecycleActions | None = None,
     ) -> None:
         self.paths = paths
         self.payload_root = Path(payload_root)
@@ -91,9 +101,10 @@ class FirstInstallService:
         *,
         progress: Callable[[str], None] | None = None,
     ) -> FirstInstallOutcome:
-        if not isinstance(options, FirstInstallOptions):
-            raise TypeError("首次安装选项类型无效。")
-        report = progress or (lambda _stage: None)
+        def ignore_progress(_stage: str) -> None:
+            return
+
+        report = progress or ignore_progress
         acquired = False
         plan: IntegrationPlan | None = None
         transaction: TransactionRecord | None = None
@@ -143,7 +154,7 @@ class FirstInstallService:
                 self.paths,
             )
             staging.mkdir()
-            _copy_manifest_payload(self.payload_root, staging, self.manifest)
+            copy_manifest_payload(self.payload_root, staging, self.manifest)
             verify_payload(staging, self.manifest)
             self._assert_required_payload_files(staging)
 
@@ -189,7 +200,7 @@ class FirstInstallService:
                     result="ok",
                     transaction_id=transaction.transaction_id,
                 )
-            except Exception as exc:
+            except InstallHistoryError as exc:
                 warning = f"安装成功，但写入安装历史失败：{exc}"
             self.state_store.remove_transaction()
             report("completed")
@@ -201,7 +212,13 @@ class FirstInstallService:
                 message="LanDrop 已完成当前用户首次安装。",
                 warning=warning,
             )
-        except Exception as exc:
+        except (
+            FirstInstallError,
+            InstallStateError,
+            OSError,
+            PayloadManifestError,
+            SystemIntegrationError,
+        ) as exc:
             report("rollback")
             rollback_errors = self._rollback_first_install(
                 plan,
@@ -250,17 +267,17 @@ class FirstInstallService:
         if plan is not None and integration_started:
             try:
                 self.integration.rollback(plan)
-            except Exception as exc:
+            except SystemIntegrationError as exc:
                 errors.append(f"系统集成：{exc}")
         if committed:
             try:
                 self.state_store.remove_install()
-            except Exception as exc:
+            except InstallStateError as exc:
                 errors.append(f"install.json：{exc}")
         if product_root_created:
             try:
                 _remove_created_install_root(self.paths)
-            except Exception as exc:
+            except (FirstInstallError, OSError) as exc:
                 errors.append(f"程序根：{exc}")
         return errors
 
@@ -284,8 +301,8 @@ class FirstInstallService:
                 transaction_id=transaction.transaction_id,
                 details={"residual_count": len(errors)},
             )
-        except Exception:
-            pass
+        except InstallHistoryError:
+            return
 
 
 def run_installed_self_check(executable: Path, *, timeout_seconds: float = 60.0) -> bool:
@@ -305,7 +322,7 @@ def run_installed_self_check(executable: Path, *, timeout_seconds: float = 60.0)
     return completed.returncode == 0
 
 
-def _copy_manifest_payload(
+def copy_manifest_payload(
     source_root: Path,
     destination_root: Path,
     manifest: PayloadManifest,

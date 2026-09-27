@@ -1,8 +1,8 @@
 from __future__ import annotations
 
+import unittest
 from pathlib import Path
 from unittest.mock import patch
-import unittest
 
 from landrop.install_contract import (
     APP_USER_MODEL_ID,
@@ -122,12 +122,14 @@ class InstallContractTests(unittest.TestCase):
             trap.mkdir(parents=True)
             target = trap / "child"
 
+            def is_trap(path: Path) -> bool:
+                return path.name == "trap"
+
             with patch(
                 "landrop.install_contract.is_reparse_object",
-                side_effect=lambda path: path.name == "trap",
-            ):
-                with self.assertRaises(UnsafeInstallPathError):
-                    validate_install_child(target, paths)
+                side_effect=is_trap,
+            ), self.assertRaises(UnsafeInstallPathError):
+                validate_install_child(target, paths)
 
     def test_reparse_between_system_anchor_and_product_root_is_rejected(self) -> None:
         with temporary_directory() as temporary:
@@ -135,12 +137,14 @@ class InstallContractTests(unittest.TestCase):
             paths.install_root.parent.mkdir(parents=True)
             target = paths.install_root / "metadata" / "install.json"
 
+            def is_programs(path: Path) -> bool:
+                return path.name == "Programs"
+
             with patch(
                 "landrop.install_contract.is_reparse_object",
-                side_effect=lambda path: path.name == "Programs",
-            ):
-                with self.assertRaises(UnsafeInstallPathError):
-                    validate_install_child(target, paths)
+                side_effect=is_programs,
+            ), self.assertRaises(UnsafeInstallPathError):
+                validate_install_child(target, paths)
 
     def test_lifecycle_mutex_identity_is_stable_and_user_path_scoped(self) -> None:
         with temporary_directory() as temporary:

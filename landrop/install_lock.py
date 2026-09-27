@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import ctypes
-from ctypes import wintypes
 import os
 import threading
+from collections.abc import Callable
+from ctypes import wintypes
+from typing import Self, cast
 
 from .install_contract import InstallPaths, lifecycle_mutex_name
-
 
 WAIT_OBJECT_0 = 0x00000000
 WAIT_ABANDONED = 0x00000080
@@ -37,7 +38,8 @@ class InstallLifecycleLock:
         resolved_paths = paths or InstallPaths.from_environment()
         self.name = mutex_name or lifecycle_mutex_name(resolved_paths)
         self._handle: int | None = None
-        self._kernel32: object | None = None
+        self._release_mutex: Callable[[wintypes.HANDLE], int] | None = None
+        self._close_handle_function: Callable[[wintypes.HANDLE], int] | None = None
         self._owned = False
         self._owner_thread_id: int | None = None
         self.was_abandoned = False
@@ -69,7 +71,10 @@ class InstallLifecycleLock:
             raise InstallLifecycleLockError(
                 f"无法创建安装生命周期锁（Windows 错误 {ctypes.get_last_error()}）。"
             )
-        self._kernel32 = kernel32
+        self._release_mutex = cast(Callable[[wintypes.HANDLE], int], kernel32.ReleaseMutex)
+        self._close_handle_function = cast(
+            Callable[[wintypes.HANDLE], int], kernel32.CloseHandle
+        )
         self._handle = int(handle)
         milliseconds = (
             INFINITE
@@ -92,11 +97,11 @@ class InstallLifecycleLock:
         raise InstallLifecycleLockError(f"安装生命周期锁返回未知状态：{result}")
 
     def release(self) -> None:
-        if not self._owned or self._handle is None or self._kernel32 is None:
+        if not self._owned or self._handle is None or self._release_mutex is None:
             return
         if self._owner_thread_id != threading.get_ident():
             raise InstallLifecycleLockError("安装生命周期锁必须由取得它的线程释放。")
-        if not self._kernel32.ReleaseMutex(wintypes.HANDLE(self._handle)):
+        if not self._release_mutex(wintypes.HANDLE(self._handle)):
             raise InstallLifecycleLockError(
                 f"释放安装生命周期锁失败（Windows 错误 {ctypes.get_last_error()}）。"
             )
@@ -107,7 +112,7 @@ class InstallLifecycleLock:
         release_error: Exception | None = None
         try:
             self.release()
-        except Exception as exc:
+        except InstallLifecycleLockError as exc:
             release_error = exc
         finally:
             self._close_handle()
@@ -115,14 +120,15 @@ class InstallLifecycleLock:
             raise release_error
 
     def _close_handle(self) -> None:
-        if self._handle is not None and self._kernel32 is not None:
-            self._kernel32.CloseHandle(wintypes.HANDLE(self._handle))
+        if self._handle is not None and self._close_handle_function is not None:
+            self._close_handle_function(wintypes.HANDLE(self._handle))
         self._handle = None
-        self._kernel32 = None
+        self._release_mutex = None
+        self._close_handle_function = None
         self._owned = False
         self._owner_thread_id = None
 
-    def __enter__(self) -> InstallLifecycleLock:
+    def __enter__(self) -> Self:
         if not self.acquire(None):
             raise InstallLifecycleLockError("无法取得安装生命周期锁。")
         return self

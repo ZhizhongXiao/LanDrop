@@ -1,14 +1,14 @@
 from __future__ import annotations
 
-from pathlib import Path
-from typing import Callable
-from unittest.mock import patch
 import unittest
+from collections.abc import Callable
+from pathlib import Path
+from unittest.mock import patch
 
 from landrop.install_contract import InstallPaths
 from landrop.install_state import InstallationStateStore
 from landrop.installer import FirstInstallOptions, FirstInstallService
-from landrop.payload_manifest import build_payload_manifest
+from landrop.payload_manifest import PayloadManifest, build_payload_manifest
 from landrop.system_integration import IntegrationPlan, SystemIntegrationError
 from tests.support import temporary_directory
 
@@ -19,7 +19,8 @@ class _FakeLock:
         self.owned = False
         self.closed = False
 
-    def acquire(self, _timeout: float) -> bool:
+    def acquire(self, timeout: float) -> bool:
+        del timeout
         self.owned = self.available
         return self.available
 
@@ -38,11 +39,15 @@ class _FakeIntegration:
         observe: Callable[[str], None] | None = None,
     ) -> None:
         self.fail_at = fail_at
-        self.observe = observe or (lambda _point: None)
+        def ignore(_point: str) -> None:
+            return None
+
+        self.observe = observe or ignore
         self.objects: set[str] = set()
         self.rollback_called = False
 
-    def assert_absent(self, _plan: IntegrationPlan) -> None:
+    def assert_absent(self, plan: IntegrationPlan) -> None:
+        del plan
         self.observe("assert_absent")
         if self.objects:
             raise SystemIntegrationError("objects already exist")
@@ -71,7 +76,8 @@ class _FakeIntegration:
         if actual != expected:
             raise SystemIntegrationError("fake readback mismatch")
 
-    def rollback(self, _plan: IntegrationPlan) -> None:
+    def rollback(self, plan: IntegrationPlan) -> None:
+        del plan
         self.rollback_called = True
         self.objects.clear()
 
@@ -85,7 +91,7 @@ class FirstInstallTests(unittest.TestCase):
             root / "temp",
         )
 
-    def _payload(self, root: Path):
+    def _payload(self, root: Path) -> tuple[Path, PayloadManifest]:
         payload = root / "bundle" / "setup_payload"
         (payload / "app" / "_internal").mkdir(parents=True)
         (payload / "maintenance").mkdir(parents=True)
@@ -113,7 +119,7 @@ class FirstInstallTests(unittest.TestCase):
             manifest=manifest,
             integration=fake_integration,
             self_check=self_check or (lambda _path: True),
-            lifecycle_lock=fake_lock,  # type: ignore[arg-type]
+            lifecycle_lock=fake_lock,
         )
         return service, paths, fake_integration, fake_lock
 
@@ -154,7 +160,9 @@ class FirstInstallTests(unittest.TestCase):
             self.assertTrue(paths.main_executable.is_file())
             self.assertTrue(paths.uninstall_executable.is_file())
             self.assertFalse(paths.transaction_state_path.exists())
-            self.assertEqual(InstallationStateStore(paths).read_install().version, "0.8.0")  # type: ignore[union-attr]
+            installed = InstallationStateStore(paths).read_install(required=True)
+            assert installed is not None
+            self.assertEqual(installed.version, "0.8.0")
             self.assertFalse(any(path.name.startswith(".staging-") for path in paths.install_root.iterdir()))
             self.assertFalse(lock.owned)
             self.assertIn("self_check", observations)
@@ -239,11 +247,11 @@ class FirstInstallTests(unittest.TestCase):
         native_error.assert_called_once()
 
     def test_setup_logging_is_file_backed_after_preflight(self) -> None:
-        from landrop.setup_app import _configure_setup_logging
+        from landrop.setup_app import configure_setup_logging
 
         with temporary_directory() as temporary:
             data_root = Path(temporary) / "Local Data" / "LanDrop"
-            logger = _configure_setup_logging(data_root)
+            logger = configure_setup_logging(data_root)
             logger.error("diagnostic-marker")
             for handler in logger.handlers:
                 handler.flush()

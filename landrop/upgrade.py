@@ -2,14 +2,16 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import ctypes
-from ctypes import wintypes
+import logging
 import os
-from pathlib import Path
 import re
 import shutil
-from typing import Callable
+from collections.abc import Callable
+from ctypes import wintypes
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Protocol
 
 from .install_contract import (
     InstallPaths,
@@ -21,12 +23,12 @@ from .install_contract import (
 )
 from .install_lock import InstallLifecycleLock
 from .install_state import (
+    InstallationStateStore,
     InstallHistoryLog,
     InstallRecord,
-    InstallationStateStore,
     TransactionRecord,
 )
-from .installer import _copy_manifest_payload, run_installed_self_check
+from .installer import copy_manifest_payload, run_installed_self_check
 from .payload_manifest import PayloadFile, PayloadManifest, verify_payload
 from .system_integration import (
     IntegrationPlan,
@@ -34,11 +36,28 @@ from .system_integration import (
     UpgradeIntegrationSnapshot,
 )
 
-
 _VERSION_PATTERN = re.compile(r"(0|[1-9][0-9]*)(?:\.(0|[1-9][0-9]*)){1,3}\Z")
 _PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
 _TH32CS_SNAPPROCESS = 0x00000002
 _INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
+
+logger = logging.getLogger(__name__)
+
+
+class _CleanupStateStore(Protocol):
+    def read_install(self, *, required: bool = False) -> InstallRecord | None: ...
+
+    def write_install(self, record: InstallRecord) -> None: ...
+
+
+class _InstallLifecycleActions(Protocol):
+    def acquire(self, timeout: float) -> bool: ...
+
+    def close(self) -> None: ...
+
+
+def _ignore_progress(_stage: str) -> None:
+    return
 
 
 class UpgradeError(RuntimeError):
@@ -98,7 +117,7 @@ class UpgradeService:
         self_check: Callable[[Path], bool] | None = None,
         state_store: InstallationStateStore | None = None,
         history: InstallHistoryLog | None = None,
-        lifecycle_lock: InstallLifecycleLock | None = None,
+        lifecycle_lock: _InstallLifecycleActions | None = None,
         executable_running: Callable[[Path], bool] | None = None,
         checkpoint: Callable[[str], None] | None = None,
         remove_tree: Callable[[Path, InstallPaths], None] | None = None,
@@ -112,15 +131,15 @@ class UpgradeService:
         self.history = history or InstallHistoryLog(paths)
         self.lifecycle_lock = lifecycle_lock or InstallLifecycleLock(paths)
         self.executable_running = executable_running or is_executable_running
-        self.checkpoint = checkpoint or (lambda _point: None)
-        self.remove_tree = remove_tree or _remove_transaction_tree
+        self.checkpoint = checkpoint or _ignore_progress
+        self.remove_tree = remove_tree or remove_transaction_tree
 
     def upgrade(
         self,
         *,
         progress: Callable[[str], None] | None = None,
     ) -> UpgradeOutcome:
-        report = progress or (lambda _stage: None)
+        report = progress or _ignore_progress
         transaction: TransactionRecord | None = None
         current: InstallRecord | None = None
         snapshot: UpgradeIntegrationSnapshot | None = None
@@ -237,6 +256,7 @@ class UpgradeService:
                     result="started",
                 )
             except Exception as exc:
+                logger.exception("Failed to append upgrade_started history event")
                 warning_parts.append(f"安装历史写入失败：{exc}")
 
             report("staging")
@@ -249,12 +269,12 @@ class UpgradeService:
                 self.paths,
             )
             staging.mkdir()
-            _copy_manifest_payload(
+            copy_manifest_payload(
                 self.payload_root / "app",
                 staging / "app",
                 app_manifest,
             )
-            _copy_manifest_payload(
+            copy_manifest_payload(
                 self.payload_root / "maintenance",
                 staging / "maintenance",
                 maintenance_manifest,
@@ -352,23 +372,19 @@ class UpgradeService:
                     transaction_id=transaction.transaction_id,
                 )
             except Exception as exc:
+                logger.exception("Failed to append committed upgrade history events")
                 warning_parts.append(f"安装历史写入失败：{exc}")
 
             report("cleanup")
-            try:
-                self.checkpoint("before_committed_cleanup")
-                cleanup_pending, cleanup_warning = self._finalize_committed_cleanup(
-                    committed_record,
-                    transaction,
-                    staging,
-                    rollback,
-                )
-                if cleanup_warning:
-                    warning_parts.append(cleanup_warning)
-            except Exception:
-                # transaction.json deliberately remains authoritative until
-                # rollback is gone or pending_cleanup has been published.
-                raise
+            self.checkpoint("before_committed_cleanup")
+            cleanup_pending, cleanup_warning = self._finalize_committed_cleanup(
+                committed_record,
+                transaction,
+                staging,
+                rollback,
+            )
+            if cleanup_warning:
+                warning_parts.append(cleanup_warning)
             if cleanup_pending:
                 report("completed")
                 return UpgradeOutcome(
@@ -392,6 +408,7 @@ class UpgradeService:
                     transaction_id=transaction.transaction_id,
                 )
             except Exception as exc:
+                logger.exception("Failed to append old_payload_removed history event")
                 warning_parts.append(f"清理历史写入失败：{exc}")
             report("completed")
             return UpgradeOutcome(
@@ -405,16 +422,17 @@ class UpgradeService:
                 warning="；".join(warning_parts),
             )
         except Exception as exc:
+            logger.exception("Upgrade transaction failed")
             if committed:
+                committed_state = self.state_store.read_install(required=True)
+                assert committed_state is not None
                 return UpgradeOutcome(
                     result="partial",
                     verified=False,
                     committed=True,
                     rollback_attempted=False,
                     rollback_succeeded=None,
-                    cleanup_pending=bool(
-                        self.state_store.read_install(required=True).pending_cleanup
-                    ),
+                    cleanup_pending=bool(committed_state.pending_cleanup),
                     message=f"升级已提交，但提交后收尾失败：{type(exc).__name__}: {exc}"[:1000],
                 )
             report("rollback")
@@ -459,6 +477,7 @@ class UpgradeService:
             if os.path.lexists(rollback):
                 self.remove_tree(rollback, self.paths)
         except Exception as exc:
+            logger.exception("Committed rollback cleanup failed; publishing pending state")
             pending_names = tuple(
                 dict.fromkeys((*committed_record.pending_cleanup, rollback.name))
             )
@@ -472,7 +491,7 @@ class UpgradeService:
             self.state_store.write_install(pending_record)
             confirmed = self.state_store.read_install(required=True)
             if confirmed is None or confirmed.pending_cleanup != pending_names:
-                raise UpgradeError("pending_cleanup 发布后读回不一致。")
+                raise UpgradeError("pending_cleanup 发布后读回不一致。") from exc
             self.state_store.remove_transaction()
             try:
                 self.history.append(
@@ -485,7 +504,7 @@ class UpgradeService:
                     details={"directory": rollback.name},
                 )
             except Exception:
-                pass
+                logger.exception("Failed to append cleanup_pending history event")
             return True, f"旧 payload 将稍后重试清理：{exc}"
 
         if rollback.name in committed_record.pending_cleanup:
@@ -585,7 +604,7 @@ class UpgradeService:
                     transaction_id=transaction.transaction_id,
                 )
             except Exception:
-                pass
+                logger.exception("Failed to append recovered upgrade history event")
             report("completed")
             return UpgradeOutcome(
                 result="success-with-warning" if warning else "already-installed",
@@ -630,7 +649,7 @@ class UpgradeService:
                 transaction_id=transaction.transaction_id,
             )
         except Exception:
-            pass
+            logger.exception("Failed to append recovered rollback history event")
         return None
 
     def _validate_recovery_snapshot(
@@ -682,18 +701,21 @@ class UpgradeService:
             elif app_switched:
                 raise UpgradeError("缺少受控 staging/rollback 路径，无法恢复 A。")
         except Exception as restore_error:
+            logger.exception("Failed to restore source payload")
             errors.append(f"payload 恢复：{restore_error}")
 
         if integration_started and snapshot is not None:
             try:
                 self.integration.restore_upgrade(snapshot)
             except Exception as restore_error:
+                logger.exception("Failed to restore upgrade system integration")
                 errors.append(f"系统集成：{restore_error}")
 
         if commit_started:
             try:
                 self.state_store.write_install(current)
             except Exception as restore_error:
+                logger.exception("Failed to restore source install.json")
                 errors.append(f"install.json：{restore_error}")
 
         if not errors:
@@ -701,16 +723,19 @@ class UpgradeService:
                 try:
                     self.remove_tree(staging, self.paths)
                 except Exception as cleanup_error:
+                    logger.exception("Failed to remove rollback staging directory")
                     errors.append(f"staging：{cleanup_error}")
             if rollback is not None and rollback.exists():
                 try:
                     self.remove_tree(rollback, self.paths)
                 except Exception as cleanup_error:
+                    logger.exception("Failed to remove rollback directory")
                     errors.append(f"rollback：{cleanup_error}")
         if not errors:
             try:
                 self.state_store.remove_transaction()
             except Exception as state_error:
+                logger.exception("Failed to remove rollback transaction journal")
                 errors.append(f"transaction.json：{state_error}")
 
         try:
@@ -732,7 +757,7 @@ class UpgradeService:
                 details={"residual_count": len(errors)},
             )
         except Exception:
-            pass
+            logger.exception("Failed to append rollback history events")
         return errors
 
     def _append_history(
@@ -764,6 +789,7 @@ def inspect_setup_state(
         try:
             transaction = store.read_transaction(required=True)
         except Exception as exc:
+            logger.exception("Unable to interpret existing transaction journal")
             return SetupInspection("untrusted", f"安装事务损坏或不可解释：{exc}")
         assert transaction is not None
         return SetupInspection(
@@ -773,6 +799,7 @@ def inspect_setup_state(
     try:
         current = store.read_install()
     except Exception as exc:
+        logger.exception("Unable to interpret install.json")
         return SetupInspection("untrusted", f"install.json 损坏或不可解释：{exc}")
     if current is None:
         if os.path.lexists(paths.install_root):
@@ -782,6 +809,7 @@ def inspect_setup_state(
         _validate_installed_layout(paths, current)
         comparison = compare_versions(manifest.version, current.version)
     except Exception as exc:
+        logger.exception("Installed layout validation failed")
         return SetupInspection("untrusted", f"已有安装状态不可信：{exc}")
     if comparison < 0:
         disposition = "downgrade_blocked"
@@ -806,13 +834,13 @@ def inspect_setup_state(
 def retry_pending_cleanup(
     paths: InstallPaths,
     *,
-    state_store: InstallationStateStore | None = None,
+    state_store: _CleanupStateStore | None = None,
     history: InstallHistoryLog | None = None,
     remove_tree: Callable[[Path, InstallPaths], None] | None = None,
 ) -> CleanupResult:
     store = state_store or InstallationStateStore(paths)
     audit = history or InstallHistoryLog(paths)
-    remover = remove_tree or _remove_transaction_tree
+    remover = remove_tree or remove_transaction_tree
     record = store.read_install()
     if record is None or not record.pending_cleanup:
         return CleanupResult(0, 0, (), ())
@@ -829,6 +857,7 @@ def retry_pending_cleanup(
             remover(target, paths)
             removed += 1
         except Exception as exc:
+            logger.exception("Pending cleanup directory removal failed")
             remaining.append(name)
             errors.append(f"{name}：{exc}")
     if tuple(remaining) != record.pending_cleanup:
@@ -842,6 +871,7 @@ def retry_pending_cleanup(
         try:
             store.write_install(updated)
         except Exception as exc:
+            logger.exception("Unable to publish updated pending_cleanup state")
             errors.append(f"pending_cleanup 状态更新失败：{exc}")
             try:
                 audit.append(
@@ -854,7 +884,7 @@ def retry_pending_cleanup(
                     },
                 )
             except Exception:
-                pass
+                logger.exception("Failed to append cleanup state-update failure history")
             return CleanupResult(
                 attempted=len(record.pending_cleanup),
                 removed=removed,
@@ -869,7 +899,7 @@ def retry_pending_cleanup(
                 details={"removed_count": removed, "remaining_count": len(remaining)},
             )
         except Exception:
-            pass
+            logger.exception("Failed to append cleanup completion history")
     elif errors:
         try:
             audit.append(
@@ -883,7 +913,7 @@ def retry_pending_cleanup(
                 },
             )
         except Exception:
-            pass
+            logger.exception("Failed to append pending cleanup retry history")
     return CleanupResult(
         attempted=len(record.pending_cleanup),
         removed=removed,
@@ -1046,6 +1076,7 @@ def _payload_matches(root: Path, manifest: PayloadManifest) -> bool:
     try:
         verify_payload(root, manifest)
     except Exception:
+        logger.debug("Payload does not match target manifest", exc_info=True)
         return False
     return True
 
@@ -1060,7 +1091,7 @@ def _rename_owned_directory(source: Path, destination: Path, paths: InstallPaths
     os.replace(source, destination)
 
 
-def _remove_transaction_tree(target: Path, paths: InstallPaths) -> None:
+def remove_transaction_tree(target: Path, paths: InstallPaths) -> None:
     directory = validate_transaction_directory(target, paths)
     if not os.path.lexists(directory):
         return

@@ -1,15 +1,15 @@
 from __future__ import annotations
 
+import subprocess
 import unittest
 from unittest.mock import patch
-import subprocess
 
 from landrop.network import (
+    RUNTIME_CATEGORY_TIMEOUT_SECONDS,
     EndpointBaseline,
     EndpointChecker,
     LanInterface,
     NetworkDiscoveryError,
-    RUNTIME_CATEGORY_TIMEOUT_SECONDS,
     read_network_category,
     select_interface,
 )
@@ -112,9 +112,9 @@ class EndpointCheckerTests(unittest.TestCase):
                 side_effect=subprocess.TimeoutExpired("powershell", 4.0),
             ),
             patch("landrop.network._read_wifi_registry_profile") as wifi_fallback,
+            self.assertRaisesRegex(NetworkDiscoveryError, "查询超时"),
         ):
-            with self.assertRaisesRegex(NetworkDiscoveryError, "查询超时"):
-                read_network_category(12, alias="WLAN")
+            read_network_category(12, alias="WLAN")
 
         wifi_fallback.assert_not_called()
 

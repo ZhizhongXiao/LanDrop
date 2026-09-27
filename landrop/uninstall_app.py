@@ -4,17 +4,20 @@ from __future__ import annotations
 
 import argparse
 import ctypes
+import logging
 import os
-from pathlib import Path
 import sys
 import threading
-from typing import Any
+from collections.abc import Callable
+from pathlib import Path
+from typing import Protocol, Self, cast
 
-from .install_contract import install_paths_for_current_windows_user
+from .install_contract import InstallPaths, install_paths_for_current_windows_user
 from .platform_checks import webview2_runtime_version
 from .resources import resource_path
 from .system_integration import PowerShellShortcutBackend, WindowsFirstInstallIntegration
 from .uninstaller import (
+    UninstallHandoff,
     UninstallLifecycleService,
     UninstallOutcome,
     UninstallSelection,
@@ -22,13 +25,67 @@ from .uninstaller import (
     schedule_temp_self_cleanup,
 )
 
+logger = logging.getLogger(__name__)
+
+
+class _ClosingEvent(Protocol):
+    def __iadd__(self, handler: Callable[[], bool]) -> Self: ...
+
+
+class _WindowEvents(Protocol):
+    closing: _ClosingEvent
+
+
+class _UninstallWindow(Protocol):
+    events: _WindowEvents
+
+    def destroy(self) -> None: ...
+
+
+class _WebviewRuntime(Protocol):
+    def create_window(
+        self,
+        title: str,
+        *,
+        url: str,
+        js_api: object,
+        width: int,
+        height: int,
+        min_size: tuple[int, int],
+        resizable: bool,
+        background_color: str,
+    ) -> _UninstallWindow | None: ...
+
+    def start(self, *, gui: str, debug: bool, private_mode: bool) -> None: ...
+
+
+class _UninstallService(Protocol):
+    paths: InstallPaths
+
+    def prepare_handoff(
+        self,
+        *,
+        source_executable: Path,
+        selection: UninstallSelection,
+        original_pid: int,
+    ) -> UninstallHandoff: ...
+
+    def execute_handoff(
+        self,
+        *,
+        current_executable: Path,
+        request_path: Path,
+        nonce: str,
+        expected_request_sha256: str,
+    ) -> UninstallOutcome: ...
+
 
 class UninstallApi:
     """Allowlisted local bridge for either the installed or temporary process."""
 
     def __init__(
         self,
-        service: UninstallLifecycleService,
+        service: _UninstallService,
         *,
         current_executable: Path,
         request_path: Path | None = None,
@@ -42,7 +99,7 @@ class UninstallApi:
         self.nonce = nonce
         self.expected_request_sha256 = expected_request_sha256
         self.installed_version = installed_version
-        self._window: Any | None = None
+        self._window: _UninstallWindow | None = None
         self._guard = threading.Lock()
         self._state_lock = threading.Lock()
         self._operation: dict[str, object] | None = None
@@ -52,7 +109,7 @@ class UninstallApi:
     def temporary_mode(self) -> bool:
         return self.request_path is not None
 
-    def attach_window(self, window: Any) -> None:
+    def attach_window(self, window: _UninstallWindow) -> None:
         self._window = window
 
     def get_context(self) -> dict[str, object]:
@@ -75,6 +132,7 @@ class UninstallApi:
             )
             launch_temporary_uninstaller(handoff)
         except Exception as exc:
+            logger.exception("Failed to prepare or launch temporary uninstaller")
             return {"ok": False, "error": str(exc)}
         if self._window is not None:
             threading.Timer(0.25, self._window.destroy).start()
@@ -121,6 +179,7 @@ class UninstallApi:
                         deleted_data=outcome.deleted_data,
                     )
             except Exception as exc:
+                logger.exception("Failed to schedule temporary uninstall cleanup")
                 outcome = UninstallOutcome(
                     complete=False,
                     message="卸载未完全完成，请查看残留项。",
@@ -133,6 +192,7 @@ class UninstallApi:
                     deleted_data=outcome.deleted_data,
                 )
         except Exception as exc:
+            logger.exception("Unhandled uninstall execution failure")
             outcome = UninstallOutcome(
                 complete=False,
                 message="卸载未执行或未完全完成。",
@@ -225,6 +285,7 @@ def main(argv: list[str] | None = None) -> int:
         else:
             installed_version = service.inspect_installed(current_executable).version
     except Exception as exc:
+        logger.exception("Unable to inspect installed LanDrop state")
         _show_native_error(str(exc))
         return 4
 
@@ -242,9 +303,10 @@ def main(argv: list[str] | None = None) -> int:
         expected_request_sha256=args.expected_request_sha256,
         installed_version=installed_version,
     )
-    window = webview.create_window(
+    webview_runtime = cast(_WebviewRuntime, webview)
+    window = webview_runtime.create_window(
         "卸载 LanDrop",
-        url=_uninstall_ui_url(temporary_mode=temporary_mode),
+        url=uninstall_ui_url(temporary_mode=temporary_mode),
         js_api=api,
         width=840,
         height=560,
@@ -252,14 +314,18 @@ def main(argv: list[str] | None = None) -> int:
         resizable=True,
         background_color="#eaf5ff",
     )
+    if window is None:
+        _show_native_error("pywebview 未能创建 LanDrop Uninstall 窗口。")
+        return 4
     api.attach_window(window)
     window.events.closing += lambda: bool(
         api.get_uninstall_status().get("phase") != "running"
     )
     exit_code = 0
     try:
-        webview.start(gui="edgechromium", debug=False, private_mode=True)
+        webview_runtime.start(gui="edgechromium", debug=False, private_mode=True)
     except Exception as exc:
+        logger.exception("Unhandled LanDrop Uninstall UI failure")
         _show_native_error(f"LanDrop Uninstall 无法继续：{exc}")
         exit_code = 4
     finally:
@@ -267,6 +333,7 @@ def main(argv: list[str] | None = None) -> int:
             try:
                 api.ensure_temp_cleanup_scheduled()
             except Exception as exc:
+                logger.exception("Unable to schedule final temporary uninstall cleanup")
                 _show_native_error(f"临时卸载文件无法安排清理：{exc}")
                 exit_code = 4
     return exit_code
@@ -285,7 +352,7 @@ def _required_resources() -> tuple[Path, ...]:
     )
 
 
-def _uninstall_ui_url(*, temporary_mode: bool) -> str:
+def uninstall_ui_url(*, temporary_mode: bool) -> str:
     page = "ui/uninstall/execute.html" if temporary_mode else "ui/uninstall/index.html"
     return resource_path(page).as_uri()
 

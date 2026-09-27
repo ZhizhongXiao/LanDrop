@@ -2,14 +2,16 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import contextlib
 import json
 import os
-from pathlib import Path
 import stat
 import subprocess
 import tempfile
-from typing import Any, Mapping, Protocol
+from collections.abc import Mapping
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Protocol, cast
 
 from .install_contract import (
     APP_USER_MODEL_ID,
@@ -24,8 +26,17 @@ from .install_contract import (
     is_reparse_object,
 )
 
-
 _MAX_SHORTCUT_BYTES = 4 * 1024 * 1024
+
+
+def _object_mapping(value: object, label: str) -> dict[str, object]:
+    """Narrow one untrusted JSON object without leaking unknown key/value types."""
+    if not isinstance(value, Mapping):
+        raise SystemIntegrationError(f"{label}必须是对象。")
+    raw = cast(Mapping[object, object], value)
+    if not all(isinstance(key, str) for key in raw):
+        raise SystemIntegrationError(f"{label}字段名无效。")
+    return {key: item for key, item in raw.items() if isinstance(key, str)}
 
 
 class SystemIntegrationError(RuntimeError):
@@ -150,26 +161,27 @@ class IntegrationPlan:
         estimated_size_kib: int,
         desktop_enabled: bool,
     ) -> IntegrationPlan:
-        if not isinstance(desktop_enabled, bool):
+        if type(desktop_enabled) is not bool:
             raise SystemIntegrationError("桌面快捷方式选项必须是布尔值。")
         target = paths.main_executable
-        shortcut_values = {
-            "target": target,
-            "arguments": "",
-            "working_directory": paths.app_directory,
-            "description": "LanDrop 局域网文件收发",
-            "icon_location": f"{target},0",
-        }
         run_command = subprocess.list2cmdline([str(target), "--startup"])
         uninstall_string = subprocess.list2cmdline([str(paths.uninstall_executable)])
         return cls(
             start_menu_shortcut=ShortcutSpec(
                 path=paths.start_menu_shortcut,
-                **shortcut_values,
+                target=target,
+                arguments="",
+                working_directory=paths.app_directory,
+                description="LanDrop 局域网文件收发",
+                icon_location=f"{target},0",
             ),
             desktop_shortcut=ShortcutSpec(
                 path=paths.desktop_shortcut,
-                **shortcut_values,
+                target=target,
+                arguments="",
+                working_directory=paths.app_directory,
+                description="LanDrop 局域网文件收发",
+                icon_location=f"{target},0",
             ),
             desktop_enabled=desktop_enabled,
             run_command=run_command,
@@ -233,7 +245,7 @@ class UpgradeIntegrationSnapshot:
     estimated_size_type: int | None = None
 
     def __post_init__(self) -> None:
-        if not isinstance(self.estimated_size_exists, bool):
+        if type(self.estimated_size_exists) is not bool:
             raise SystemIntegrationError("升级快照 EstimatedSize 存在状态无效。")
         if self.estimated_size_exists:
             value = (
@@ -242,9 +254,9 @@ class UpgradeIntegrationSnapshot:
                 else self.estimated_size_value
             )
             value_type = 4 if self.estimated_size_type is None else self.estimated_size_type
-            if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+            if type(value) is not int or value < 1:
                 raise SystemIntegrationError("升级快照 EstimatedSize 值无效。")
-            if not isinstance(value_type, int):
+            if type(value_type) is not int:
                 raise SystemIntegrationError("升级快照 EstimatedSize 类型无效。")
             object.__setattr__(self, "estimated_size_value", value)
             object.__setattr__(self, "estimated_size_type", value_type)
@@ -297,35 +309,44 @@ class UpgradeIntegrationSnapshot:
         estimated_size_raw = raw["estimated_size_state"]
         desktop_path = raw["desktop_shortcut_path"]
         run_command = raw["run_command"]
-        if not isinstance(start_menu_raw, Mapping):
-            raise SystemIntegrationError("升级快照缺少开始菜单快捷方式。")
-        if desktop_raw is not None and not isinstance(desktop_raw, Mapping):
-            raise SystemIntegrationError("升级快照桌面快捷方式无效。")
-        if not isinstance(registration_raw, Mapping):
-            raise SystemIntegrationError("升级快照卸载登记无效。")
+        start_menu_mapping = _object_mapping(start_menu_raw, "升级快照开始菜单快捷方式")
+        desktop_mapping = (
+            None
+            if desktop_raw is None
+            else _object_mapping(desktop_raw, "升级快照桌面快捷方式")
+        )
+        registration_mapping = _object_mapping(registration_raw, "升级快照卸载登记")
+        estimated_size_mapping = _object_mapping(
+            estimated_size_raw, "升级快照 EstimatedSize 状态"
+        )
         if (
-            not isinstance(estimated_size_raw, Mapping)
-            or set(estimated_size_raw) != {"exists", "value", "type"}
-            or not isinstance(estimated_size_raw["exists"], bool)
+            set(estimated_size_mapping) != {"exists", "value", "type"}
+            or type(estimated_size_mapping["exists"]) is not bool
         ):
             raise SystemIntegrationError("升级快照 EstimatedSize 状态无效。")
+        estimated_size_value = estimated_size_mapping["value"]
+        estimated_size_type = estimated_size_mapping["type"]
+        if estimated_size_value is not None and type(estimated_size_value) is not int:
+            raise SystemIntegrationError("升级快照 EstimatedSize 值无效。")
+        if estimated_size_type is not None and type(estimated_size_type) is not int:
+            raise SystemIntegrationError("升级快照 EstimatedSize 类型无效。")
         if not isinstance(desktop_path, str) or not desktop_path:
             raise SystemIntegrationError("升级快照桌面快捷方式路径无效。")
         if run_command is not None and not isinstance(run_command, str):
             raise SystemIntegrationError("升级快照 HKCU Run 值无效。")
         return cls(
-            start_menu_shortcut=ShortcutSpec.from_bridge_json(start_menu_raw),
+            start_menu_shortcut=ShortcutSpec.from_bridge_json(start_menu_mapping),
             desktop_shortcut_path=_absolute(Path(desktop_path), "桌面快捷方式路径"),
             desktop_shortcut=(
                 None
-                if desktop_raw is None
-                else ShortcutSpec.from_bridge_json(desktop_raw)
+                if desktop_mapping is None
+                else ShortcutSpec.from_bridge_json(desktop_mapping)
             ),
             run_command=run_command,
-            registration=_registration_from_values(registration_raw),
-            estimated_size_exists=bool(estimated_size_raw["exists"]),
-            estimated_size_value=estimated_size_raw["value"],  # type: ignore[arg-type]
-            estimated_size_type=estimated_size_raw["type"],  # type: ignore[arg-type]
+            registration=_registration_from_values(registration_mapping),
+            estimated_size_exists=estimated_size_mapping["exists"],
+            estimated_size_value=estimated_size_value,
+            estimated_size_type=estimated_size_type,
         )
 
 
@@ -423,11 +444,12 @@ class PowerShellShortcutBackend:
                 f"快捷方式桥接返回 {completed.returncode}：{detail or '无输出'}"
             )
         try:
-            payload = json.loads(completed.stdout)
+            payload_object: object = json.loads(completed.stdout)
         except json.JSONDecodeError as exc:
             raise SystemIntegrationError("快捷方式桥接返回了无效 JSON。") from exc
-        if not isinstance(payload, dict) or payload.get("ok") is not True:
-            raise SystemIntegrationError(f"快捷方式桥接结果无效：{payload!r}")
+        payload = _object_mapping(payload_object, "快捷方式桥接结果")
+        if payload.get("ok") is not True:
+            raise SystemIntegrationError(f"快捷方式桥接结果无效：{payload_object!r}")
         return payload
 
     def read(self, path: Path) -> ShortcutSpec | None:
@@ -437,9 +459,10 @@ class PowerShellShortcutBackend:
         payload = self._run("Read", {"path": str(target)})
         if payload.get("exists") is False:
             return None
-        if payload.get("readable") is not True or not isinstance(payload.get("shortcut"), dict):
+        if payload.get("readable") is not True:
             raise SystemIntegrationError("现有快捷方式无法安全解释。")
-        return ShortcutSpec.from_bridge_json(payload["shortcut"])
+        shortcut = _object_mapping(payload.get("shortcut"), "快捷方式读回数据")
+        return ShortcutSpec.from_bridge_json(shortcut)
 
     def write(self, shortcut: ShortcutSpec) -> None:
         target = self._allowed(shortcut.path)
@@ -462,10 +485,8 @@ class PowerShellShortcutBackend:
         try:
             target.unlink()
             if target.parent.name == PRODUCT_ID:
-                try:
+                with contextlib.suppress(OSError):
                     target.parent.rmdir()
-                except OSError:
-                    pass
         except OSError as exc:
             raise SystemIntegrationError(f"无法删除快捷方式：{target}：{exc}") from exc
 
@@ -520,15 +541,16 @@ class WindowsFirstInstallIntegration:
         for shortcut in (plan.desktop_shortcut, plan.start_menu_shortcut):
             try:
                 self._shortcuts.remove_created(shortcut.path)
-            except Exception as exc:
+            # Rollback must continue across independently owned backend objects.
+            except Exception as exc:  # noqa: BLE001
                 errors.append(str(exc))
         try:
             self._remove_created_run()
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 -- continue best-effort rollback
             errors.append(str(exc))
         try:
             self._remove_created_uninstall()
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 -- continue best-effort rollback
             errors.append(str(exc))
         if errors:
             raise SystemIntegrationError("系统集成回滚不完整：" + "；".join(errors))
@@ -557,7 +579,8 @@ class WindowsFirstInstallIntegration:
                         residuals.append(f"{object_id} 删除后仍存在。")
                     else:
                         removed.append(object_id)
-            except Exception as exc:
+            # Uninstall converts every backend failure into a visible residual.
+            except Exception as exc:  # noqa: BLE001
                 residuals.append(f"{object_id} 无法安全清理：{exc}")
 
         try:
@@ -572,7 +595,7 @@ class WindowsFirstInstallIntegration:
                     removed.append("run_value")
                 else:
                     residuals.append("run_value 删除后仍存在。")
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 -- report residual, continue cleanup
             residuals.append(f"run_value 无法安全清理：{exc}")
 
         try:
@@ -585,7 +608,7 @@ class WindowsFirstInstallIntegration:
                     removed.append("startup_approved_run_value")
                 else:
                     residuals.append("startup_approved_run_value 删除后仍存在。")
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 -- report residual, continue cleanup
             residuals.append(
                 f"startup_approved_run_value 无法安全清理：{exc}"
             )
@@ -608,7 +631,7 @@ class WindowsFirstInstallIntegration:
                     removed.append("uninstall_key")
                 else:
                     residuals.append("uninstall_key 删除后仍存在。")
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 -- report residual, continue cleanup
             residuals.append(f"uninstall_key 无法安全清理：{exc}")
 
         return SystemIntegrationRemovalResult(
@@ -620,7 +643,7 @@ class WindowsFirstInstallIntegration:
     def snapshot(self, plan: IntegrationPlan) -> UpgradeIntegrationSnapshot:
         """Validate a committed install and capture values without changing them."""
         start_menu = self._shortcuts.read(plan.start_menu_shortcut.path)
-        if start_menu != plan.start_menu_shortcut:
+        if start_menu is None or start_menu != plan.start_menu_shortcut:
             raise SystemIntegrationError("开始菜单快捷方式与当前安装状态不一致。")
         desktop = self._shortcuts.read(plan.desktop_shortcut.path)
         if desktop is not None and desktop != plan.desktop_shortcut:
@@ -874,18 +897,22 @@ class WindowsFirstInstallIntegration:
                     snapshot.registration.display_version,
                 )
                 if snapshot.estimated_size_exists:
+                    value_type = snapshot.estimated_size_type
+                    value = snapshot.estimated_size_value
+                    if value_type is None or value is None:
+                        raise SystemIntegrationError(
+                            "恢复快照缺少 EstimatedSize 值或类型。"
+                        )
                     registry.SetValueEx(
                         key,
                         "EstimatedSize",
                         0,
-                        int(snapshot.estimated_size_type),
-                        snapshot.estimated_size_value,
+                        value_type,
+                        value,
                     )
                 else:
-                    try:
+                    with contextlib.suppress(FileNotFoundError):
                         registry.DeleteValue(key, "EstimatedSize")
-                    except FileNotFoundError:
-                        pass
         except FileNotFoundError as exc:
             raise SystemIntegrationError("恢复时卸载登记已消失。") from exc
 
@@ -930,7 +957,7 @@ def installed_size_kib(root: Path) -> int:
 
 
 def _registration_from_values(
-    values: Mapping[str, str | int],
+    values: Mapping[str, object],
 ) -> InstalledAppRegistration:
     expected = {
         "DisplayName",
@@ -945,30 +972,28 @@ def _registration_from_values(
     }
     if set(values) != expected:
         raise SystemIntegrationError("卸载登记字段集合不符合冻结清单。")
-    text_fields = (
-        "DisplayName",
-        "DisplayVersion",
-        "Publisher",
-        "DisplayIcon",
-        "InstallLocation",
-        "UninstallString",
-    )
-    integer_fields = ("EstimatedSize", "NoModify", "NoRepair")
-    if any(not isinstance(values[name], str) for name in text_fields) or any(
-        isinstance(values[name], bool) or not isinstance(values[name], int)
-        for name in integer_fields
-    ):
-        raise SystemIntegrationError("卸载登记字段类型不符合冻结清单。")
+    def text_value(name: str) -> str:
+        value = values[name]
+        if not isinstance(value, str):
+            raise SystemIntegrationError("卸载登记字段类型不符合冻结清单。")
+        return value
+
+    def integer_value(name: str) -> int:
+        value = values[name]
+        if type(value) is not int:
+            raise SystemIntegrationError("卸载登记字段类型不符合冻结清单。")
+        return value
+
     return InstalledAppRegistration(
-        display_name=str(values["DisplayName"]),
-        display_version=str(values["DisplayVersion"]),
-        publisher=str(values["Publisher"]),
-        display_icon=str(values["DisplayIcon"]),
-        install_location=str(values["InstallLocation"]),
-        uninstall_string=str(values["UninstallString"]),
-        estimated_size_kib=int(values["EstimatedSize"]),
-        no_modify=int(values["NoModify"]),
-        no_repair=int(values["NoRepair"]),
+        display_name=text_value("DisplayName"),
+        display_version=text_value("DisplayVersion"),
+        publisher=text_value("Publisher"),
+        display_icon=text_value("DisplayIcon"),
+        install_location=text_value("InstallLocation"),
+        uninstall_string=text_value("UninstallString"),
+        estimated_size_kib=integer_value("EstimatedSize"),
+        no_modify=integer_value("NoModify"),
+        no_repair=integer_value("NoRepair"),
     )
 
 

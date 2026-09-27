@@ -3,6 +3,7 @@ from __future__ import annotations
 import threading
 import time
 import unittest
+from dataclasses import replace
 
 from landrop.coordinator import ActionCoordinator
 from landrop.service import ServiceSnapshot
@@ -71,7 +72,9 @@ class _Controller:
     def snapshot(self) -> ServiceSnapshot:
         return self.state
 
-    def apply_expected_action(self, action: str, *, session_id: str, deadline_revision: int):
+    def apply_expected_action(
+        self, action: str, *, session_id: str, deadline_revision: int
+    ) -> tuple[bool, ServiceSnapshot]:
         if (
             not self.state.running
             or self.state.session_id != session_id
@@ -80,23 +83,37 @@ class _Controller:
             return False, self.state
         self.actions.append(action)
         if action == "reset":
-            self.state = ServiceSnapshot(
-                **{**self.state.to_dict(), "deadline_revision": self.state.deadline_revision + 1}
+            self.state = replace(
+                self.state,
+                deadline_revision=self.state.deadline_revision + 1,
             )
         elif action == "stop":
-            self.state = ServiceSnapshot(
-                **{**self.state.to_dict(), "running": False, "phase": "stopped"}
-            )
+            self.state = replace(self.state, running=False, phase="stopped")
         return True, self.state
 
     def stop(self, reason: str) -> ServiceSnapshot:
         self.actions.append(reason)
-        self.state = ServiceSnapshot(
-            **{**self.state.to_dict(), "running": False, "phase": "stopped", "stop_reason": reason}
+        self.state = replace(
+            self.state,
+            running=False,
+            phase="stopped",
+            stop_reason=reason,
         )
         return self.state
 
-    def start(self, *_args):
+    def start(
+        self,
+        shared_directory: str,
+        receive_directory: str,
+        max_upload_mb: int = 1000,
+        interface_selector: str | None = None,
+    ) -> ServiceSnapshot:
+        _args = (
+            shared_directory,
+            receive_directory,
+            max_upload_mb,
+            interface_selector,
+        )
         self.start_args = _args
         return self.state
 
@@ -107,7 +124,9 @@ class _BlockingStopController(_Controller):
         self.stop_entered = threading.Event()
         self.allow_stop = threading.Event()
 
-    def apply_expected_action(self, action: str, *, session_id: str, deadline_revision: int):
+    def apply_expected_action(
+        self, action: str, *, session_id: str, deadline_revision: int
+    ) -> tuple[bool, ServiceSnapshot]:
         if action == "stop":
             self.stop_entered.set()
             self.allow_stop.wait(2)
@@ -181,21 +200,24 @@ class ActionCoordinatorTests(unittest.TestCase):
                 stopped_published.set() if not state.running else None
             ),
         )
+
+        def send_stopped(reason: str) -> bool:
+            if reason != "deadline_no_active":
+                return False
+            stopped_notice_sent.set()
+            return True
+
         coordinator.start_expiry_monitor(
             lambda _session, _revision: False,
-            lambda reason: stopped_notice_sent.set()
-            if reason == "deadline_no_active"
-            else False,
+            send_stopped,
         )
         time.sleep(0.3)
 
-        self.controller.state = ServiceSnapshot(
-            **{
-                **self.controller.state.to_dict(),
-                "running": False,
-                "phase": "stopped",
-                "stop_reason": "deadline_no_active",
-            }
+        self.controller.state = replace(
+            self.controller.state,
+            running=False,
+            phase="stopped",
+            stop_reason="deadline_no_active",
         )
         try:
             self.assertTrue(blocking_toasts.clear_started.wait(1))
@@ -215,13 +237,11 @@ class ActionCoordinatorTests(unittest.TestCase):
         )
         time.sleep(0.3)
 
-        self.controller.state = ServiceSnapshot(
-            **{
-                **self.controller.state.to_dict(),
-                "running": False,
-                "phase": "stopped",
-                "stop_reason": "manual_stop",
-            }
+        self.controller.state = replace(
+            self.controller.state,
+            running=False,
+            phase="stopped",
+            stop_reason="manual_stop",
         )
         time.sleep(0.4)
         coordinator.request_exit()
@@ -243,13 +263,11 @@ class ActionCoordinatorTests(unittest.TestCase):
         )
         time.sleep(0.3)
 
-        self.controller.state = ServiceSnapshot(
-            **{
-                **self.controller.state.to_dict(),
-                "running": False,
-                "phase": "stopped",
-                "stop_reason": "network_changed",
-            }
+        self.controller.state = replace(
+            self.controller.state,
+            running=False,
+            phase="stopped",
+            stop_reason="network_changed",
         )
         deadline = time.monotonic() + 1
         while "toast:network_changed" not in events and time.monotonic() < deadline:
@@ -275,13 +293,11 @@ class ActionCoordinatorTests(unittest.TestCase):
         )
         time.sleep(0.3)
 
-        self.controller.state = ServiceSnapshot(
-            **{
-                **self.controller.state.to_dict(),
-                "running": False,
-                "phase": "stopped",
-                "stop_reason": "network_category_unavailable",
-            }
+        self.controller.state = replace(
+            self.controller.state,
+            running=False,
+            phase="stopped",
+            stop_reason="network_category_unavailable",
         )
         deadline = time.monotonic() + 1
         expected = "toast:network_category_unavailable"

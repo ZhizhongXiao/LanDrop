@@ -1,19 +1,22 @@
 from __future__ import annotations
 
-from io import BytesIO
 import json
-from pathlib import Path
 import re
 import threading
 import unittest
+from collections.abc import Callable, Iterable
+from io import BytesIO
+from pathlib import Path
+from types import TracebackType
 from unittest.mock import patch
 from urllib.parse import quote, urlencode
 from wsgiref.util import setup_testing_defaults
 
+from support import temporary_directory
+
 from landrop.lifecycle import SessionLifecycle
 from landrop.trust import CredentialStore
-from landrop.web import WebConfig, _TrackedIterable, create_application
-from support import temporary_directory
+from landrop.web import StartResponse, TrackedIterable, WebConfig, create_application
 
 
 class BottleApplicationTests(unittest.TestCase):
@@ -316,7 +319,9 @@ class BottleApplicationTests(unittest.TestCase):
         self.assertTrue(status.startswith("403"), status)
 
         second_code = self.lifecycle.pairing_code
-        second_qr = self.lifecycle.pairing_invitation()[2]  # type: ignore[index]
+        second_invitation = self.lifecycle.pairing_invitation()
+        assert second_invitation is not None
+        second_qr = second_invitation[2]
         status, _headers, _body = wsgi_request(
             self.app,
             "/pair/qr",
@@ -407,7 +412,7 @@ class BottleApplicationTests(unittest.TestCase):
     def test_expected_download_cancellation_ends_iteration_cleanly(self) -> None:
         lifecycle = SessionLifecycle()
         transfer = lifecycle.begin_transfer("download")
-        response = _TrackedIterable([b"content"], transfer)
+        response = TrackedIterable([b"content"], transfer)
 
         lifecycle.stop("manual_stop", "manual_stop")
 
@@ -495,7 +500,10 @@ class BottleApplicationTests(unittest.TestCase):
 
 
 def wsgi_request(
-    app: object,
+    app: Callable[
+        [dict[str, object], StartResponse],
+        Iterable[bytes],
+    ],
     path: str,
     *,
     method: str = "GET",
@@ -522,11 +530,18 @@ def wsgi_request(
         environ["HTTP_RANGE"] = range_header
     if extra_headers:
         environ.update(extra_headers)
-    captured: dict[str, object] = {}
+    captured_status = ""
+    captured_headers: dict[str, str] = {}
 
-    def start_response(status: str, headers: list[tuple[str, str]], _exc_info=None) -> None:
-        captured["status"] = status
-        captured["headers"] = dict(headers)
+    def start_response(
+        status: str,
+        headers: list[tuple[str, str]],
+        exc_info: tuple[type[BaseException], BaseException, TracebackType] | None = None,
+    ) -> None:
+        del exc_info
+        nonlocal captured_status, captured_headers
+        captured_status = status
+        captured_headers = dict(headers)
 
     iterable = app(environ, start_response)
     try:
@@ -535,7 +550,7 @@ def wsgi_request(
         close = getattr(iterable, "close", None)
         if close is not None:
             close()
-    return str(captured["status"]), captured["headers"], response_body
+    return captured_status, captured_headers, response_body
 
 
 def multipart_upload(csrf: str, filename: str, content: bytes) -> tuple[bytes, str]:
@@ -547,7 +562,7 @@ def multipart_upload(csrf: str, filename: str, content: bytes) -> tuple[bytes, s
         f"--{boundary}\r\n"
         f'Content-Disposition: form-data; name="file"; filename="{filename}"\r\n'
         "Content-Type: application/octet-stream\r\n\r\n"
-    ).encode("utf-8") + content + f"\r\n--{boundary}--\r\n".encode()
+    ).encode() + content + f"\r\n--{boundary}--\r\n".encode()
     return body, f"multipart/form-data; boundary={boundary}"
 
 

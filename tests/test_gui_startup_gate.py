@@ -1,15 +1,15 @@
 from __future__ import annotations
 
 import os
-from pathlib import Path
 import sys
-from unittest.mock import MagicMock, patch
 import unittest
+from pathlib import Path
+from unittest.mock import MagicMock, patch
 
-import landrop.gui as gui
+from landrop import gui
 from landrop.install_contract import InstallPaths, transaction_directory_name
 from landrop.install_lock import InstallLifecycleLockError
-from landrop.install_state import InstallationStateStore, TransactionRecord
+from landrop.install_state import InstallationStateStore, InstallRecord, TransactionRecord
 from landrop.upgrade import CleanupResult
 from tests.support import temporary_directory
 
@@ -19,7 +19,8 @@ class _FakeLifecycleLock:
         self.events = events
         self.available = available
 
-    def acquire(self, _timeout: float) -> bool:
+    def acquire(self, timeout: float) -> bool:
+        del timeout
         self.events.append("lifecycle.acquire")
         return self.available
 
@@ -38,6 +39,12 @@ class _FakeDesktopInstance:
     def close(self) -> None:
         self.events.append("desktop.close")
 
+    def notify_existing(self) -> bool:
+        return True
+
+    def set_activate_callback(self, callback: object) -> None:
+        del callback
+
 
 class _RecordingStateStore:
     def __init__(self, events: list[str]) -> None:
@@ -46,9 +53,13 @@ class _RecordingStateStore:
     def ensure_normal_start_allowed(self) -> None:
         self.events.append("transaction.check")
 
-    def read_install(self):
+    def read_install(self, *, required: bool = False) -> InstallRecord | None:
+        del required
         self.events.append("cleanup.check")
-        return None
+
+    def write_install(self, record: InstallRecord) -> None:
+        del record
+        raise NotImplementedError
 
 
 class DesktopStartupGateTests(unittest.TestCase):
@@ -64,12 +75,12 @@ class DesktopStartupGateTests(unittest.TestCase):
         with temporary_directory() as temporary:
             events: list[str] = []
             desktop = _FakeDesktopInstance(events)
-            instance, primary = gui._acquire_desktop_startup_ownership(
+            instance, primary = gui.acquire_desktop_startup_ownership(
                 Path(temporary) / "data",
                 install_paths=self._paths(Path(temporary)),
-                lifecycle_lock=_FakeLifecycleLock(events),  # type: ignore[arg-type]
-                state_store=_RecordingStateStore(events),  # type: ignore[arg-type]
-                single_instance=desktop,  # type: ignore[arg-type]
+                lifecycle_lock=_FakeLifecycleLock(events),
+                state_store=_RecordingStateStore(events),
+                single_instance=desktop,
             )
             self.assertIs(instance, desktop)
             self.assertTrue(primary)
@@ -83,12 +94,6 @@ class DesktopStartupGateTests(unittest.TestCase):
                     "lifecycle.close",
                 ],
             )
-
-    def test_windows_startup_keeps_the_single_window_hidden_and_unfocused(self) -> None:
-        self.assertEqual(
-            gui._desktop_window_visibility(True),
-            {"hidden": True, "focus": False},
-        )
 
     def test_pending_cleanup_failure_does_not_block_committed_app_start(self) -> None:
         with temporary_directory() as temporary:
@@ -106,12 +111,12 @@ class DesktopStartupGateTests(unittest.TestCase):
                     errors=("locked",),
                 )
 
-            instance, primary = gui._acquire_desktop_startup_ownership(
+            instance, primary = gui.acquire_desktop_startup_ownership(
                 Path(temporary) / "data",
                 install_paths=self._paths(Path(temporary)),
-                lifecycle_lock=_FakeLifecycleLock(events),  # type: ignore[arg-type]
-                state_store=_RecordingStateStore(events),  # type: ignore[arg-type]
-                single_instance=desktop,  # type: ignore[arg-type]
+                lifecycle_lock=_FakeLifecycleLock(events),
+                state_store=_RecordingStateStore(events),
+                single_instance=desktop,
                 cleanup_retry=cleanup_retry,
             )
 
@@ -127,11 +132,6 @@ class DesktopStartupGateTests(unittest.TestCase):
                     "lifecycle.close",
                 ],
             )
-        self.assertEqual(
-            gui._desktop_window_visibility(False),
-            {"hidden": False, "focus": True},
-        )
-
     def test_transaction_residue_blocks_before_desktop_single_instance(self) -> None:
         with temporary_directory() as temporary:
             root = Path(temporary)
@@ -150,12 +150,12 @@ class DesktopStartupGateTests(unittest.TestCase):
             events: list[str] = []
 
             with self.assertRaisesRegex(RuntimeError, "未完成"):
-                gui._acquire_desktop_startup_ownership(
+                gui.acquire_desktop_startup_ownership(
                     root / "data",
                     install_paths=paths,
-                    lifecycle_lock=_FakeLifecycleLock(events),  # type: ignore[arg-type]
+                    lifecycle_lock=_FakeLifecycleLock(events),
                     state_store=InstallationStateStore(paths),
-                    single_instance=_FakeDesktopInstance(events),  # type: ignore[arg-type]
+                    single_instance=_FakeDesktopInstance(events),
                 )
             self.assertEqual(events, ["lifecycle.acquire", "desktop.close", "lifecycle.close"])
 
@@ -168,12 +168,12 @@ class DesktopStartupGateTests(unittest.TestCase):
             events: list[str] = []
 
             with self.assertRaisesRegex(RuntimeError, "损坏"):
-                gui._acquire_desktop_startup_ownership(
+                gui.acquire_desktop_startup_ownership(
                     root / "data",
                     install_paths=paths,
-                    lifecycle_lock=_FakeLifecycleLock(events),  # type: ignore[arg-type]
+                    lifecycle_lock=_FakeLifecycleLock(events),
                     state_store=InstallationStateStore(paths),
-                    single_instance=_FakeDesktopInstance(events),  # type: ignore[arg-type]
+                    single_instance=_FakeDesktopInstance(events),
                 )
             self.assertEqual(events, ["lifecycle.acquire", "desktop.close", "lifecycle.close"])
 
@@ -181,12 +181,12 @@ class DesktopStartupGateTests(unittest.TestCase):
         with temporary_directory() as temporary:
             events: list[str] = []
             with self.assertRaisesRegex(InstallLifecycleLockError, "安装"):
-                gui._acquire_desktop_startup_ownership(
+                gui.acquire_desktop_startup_ownership(
                     Path(temporary) / "data",
                     install_paths=self._paths(Path(temporary)),
-                    lifecycle_lock=_FakeLifecycleLock(events, available=False),  # type: ignore[arg-type]
-                    state_store=_RecordingStateStore(events),  # type: ignore[arg-type]
-                    single_instance=_FakeDesktopInstance(events),  # type: ignore[arg-type]
+                    lifecycle_lock=_FakeLifecycleLock(events, available=False),
+                    state_store=_RecordingStateStore(events),
+                    single_instance=_FakeDesktopInstance(events),
                 )
             self.assertEqual(events, ["lifecycle.acquire", "desktop.close", "lifecycle.close"])
 

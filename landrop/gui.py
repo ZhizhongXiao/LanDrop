@@ -5,35 +5,132 @@ from __future__ import annotations
 import argparse
 import ctypes
 import json
+import logging
 import os
-from pathlib import Path
 import platform
 import sys
-from typing import Any
+from collections.abc import Callable, Sequence
+from pathlib import Path
+from typing import Any, Protocol, Self, TypeGuard, cast
 
 from . import __version__
 from .app_logging import configure_application_logging, install_exception_hooks
+from .coordinator import ActionCoordinator, ActionResult
 from .install_contract import InstallContractError, InstallPaths
 from .install_lock import InstallLifecycleLock, InstallLifecycleLockError
-from .install_state import InstallationStateStore, InstallStateError
-from .settings import (
-    AppSettings,
-    DEFAULT_MAX_UPLOAD_MB,
-    SettingsError,
-    SettingsStore,
-    default_data_directory,
-)
-from .coordinator import ActionCoordinator
+from .install_state import InstallationStateStore, InstallRecord, InstallStateError
 from .notifications import WindowsToastBackend
 from .platform_checks import webview2_runtime_version
 from .qr_invite import qr_png_data_uri
 from .resources import resource_path
-from .service import ServiceController, ServiceError
+from .service import ServiceController, ServiceError, ServiceSnapshot
+from .settings import (
+    DEFAULT_MAX_UPLOAD_MB,
+    AppSettings,
+    SettingsError,
+    SettingsStore,
+    default_data_directory,
+)
 from .single_instance import DesktopSingleInstance, SingleInstanceError
 from .storage import StorageError, cleanup_orphaned_upload_parts
 from .tray import LanDropTray, TrayUnavailableError
 from .trust import CredentialStore
 from .upgrade import retry_pending_cleanup
+
+_logger = logging.getLogger("landrop")
+
+
+class _ClosingEvent(Protocol):
+    def __iadd__(self, handler: Callable[[], bool]) -> Self: ...
+
+
+class _WindowEvents(Protocol):
+    closing: _ClosingEvent
+
+
+class _DesktopWindow(Protocol):
+    events: _WindowEvents
+
+    def create_file_dialog(
+        self,
+        dialog_type: object,
+        *,
+        directory: str,
+        allow_multiple: bool,
+    ) -> Sequence[str] | None: ...
+
+    def hide(self) -> None: ...
+
+    def show(self) -> None: ...
+
+    def restore(self) -> None: ...
+
+    def destroy(self) -> None: ...
+
+
+class _WebviewRuntime(Protocol):
+    def create_window(
+        self,
+        title: str,
+        *,
+        url: str,
+        js_api: object,
+        width: int,
+        height: int,
+        min_size: tuple[int, int],
+        hidden: bool,
+        focus: bool,
+        background_color: str,
+        text_select: bool,
+    ) -> _DesktopWindow | None: ...
+
+    def start(self, *, icon: str) -> None: ...
+
+
+class _DesktopController(Protocol):
+    def snapshot(self) -> ServiceSnapshot: ...
+
+    def available_interfaces(self) -> list[dict[str, object]]: ...
+
+    def refresh_diagnostics(self) -> ServiceSnapshot: ...
+
+
+class _CoordinatorActions(Protocol):
+    def start_from_gui(
+        self,
+        shared_directory: str,
+        receive_directory: str,
+        max_upload_mb: int,
+        interface_selector: str | None,
+    ) -> ServiceSnapshot: ...
+
+    def stop_from_ui(self) -> ActionResult: ...
+
+    def reset_from_tray(self) -> ActionResult: ...
+
+
+class _InstallLifecycleActions(Protocol):
+    def acquire(self, timeout: float) -> bool: ...
+
+    def close(self) -> None: ...
+
+
+class _InstallationStateActions(Protocol):
+    def ensure_normal_start_allowed(self) -> None: ...
+
+    def read_install(self, *, required: bool = False) -> InstallRecord | None: ...
+
+    def write_install(self, record: InstallRecord) -> None: ...
+
+
+class _DesktopOwnership(Protocol):
+    def acquire(self) -> bool: ...
+
+    def notify_existing(self) -> bool: ...
+
+    def set_activate_callback(self, callback: Callable[[], object]) -> None: ...
+
+    def close(self) -> None: ...
 
 
 class DesktopApi:
@@ -41,7 +138,7 @@ class DesktopApi:
 
     def __init__(
         self,
-        controller: ServiceController,
+        controller: _DesktopController,
         credentials: CredentialStore,
         webview_module: Any,
         settings: SettingsStore | None = None,
@@ -51,13 +148,13 @@ class DesktopApi:
         self._webview = webview_module
         self._settings_store = settings or SettingsStore(credentials.data_directory)
         self._settings = self._settings_store.load()
-        self._window: Any | None = None
-        self._coordinator: ActionCoordinator | None = None
+        self._window: _DesktopWindow | None = None
+        self._coordinator: _CoordinatorActions | None = None
 
-    def attach_window(self, window: Any) -> None:
+    def attach_window(self, window: _DesktopWindow) -> None:
         self._window = window
 
-    def attach_coordinator(self, coordinator: ActionCoordinator) -> None:
+    def attach_coordinator(self, coordinator: _CoordinatorActions) -> None:
         self._coordinator = coordinator
 
     def get_state(self) -> dict[str, object]:
@@ -74,7 +171,7 @@ class DesktopApi:
             "warning": warning,
         }
 
-    def _desktop_state(self, snapshot: Any) -> dict[str, object]:
+    def _desktop_state(self, snapshot: ServiceSnapshot) -> dict[str, object]:
         state = snapshot.to_dict()
         qr_provider = getattr(self._controller, "pairing_qr_data_uri", None)
         state["pairing_qr_data_uri"] = qr_provider() if callable(qr_provider) else ""
@@ -99,6 +196,7 @@ class DesktopApi:
                 allow_multiple=False,
             )
         except Exception as exc:
+            _logger.warning("无法打开目录选择器", exc_info=True)
             return {"ok": False, "error": f"无法打开目录选择器：{exc}"}
         if not selected:
             return {"ok": True, "cancelled": True}
@@ -106,7 +204,10 @@ class DesktopApi:
 
     def start_service(self, options: dict[str, object]) -> dict[str, object]:
         try:
-            max_upload_mb = int(options.get("max_upload_mb", DEFAULT_MAX_UPLOAD_MB))
+            max_upload_mb = _integer_option(
+                options.get("max_upload_mb"),
+                default=DEFAULT_MAX_UPLOAD_MB,
+            )
             if self._coordinator is None:
                 raise RuntimeError("桌面运行时尚未准备完成。")
             snapshot = self._coordinator.start_from_gui(
@@ -135,7 +236,10 @@ class DesktopApi:
         try:
             shared = _existing_gui_directory(options.get("shared_directory"), "下载来源")
             received = _existing_gui_directory(options.get("receive_directory"), "上传保存")
-            max_upload_mb = int(options.get("max_upload_mb", DEFAULT_MAX_UPLOAD_MB))
+            max_upload_mb = _integer_option(
+                options.get("max_upload_mb"),
+                default=DEFAULT_MAX_UPLOAD_MB,
+            )
             settings = AppSettings(shared, received, max_upload_mb)
             self._settings_store.save(settings)
             self._settings = settings
@@ -147,6 +251,7 @@ class DesktopApi:
         try:
             return {"ok": True, "interfaces": self._controller.available_interfaces()}
         except Exception as exc:
+            _logger.warning("无法刷新网络接口", exc_info=True)
             return {"ok": False, "error": f"无法刷新网络接口：{exc}", "interfaces": []}
 
     def stop_service(self) -> dict[str, object]:
@@ -155,6 +260,7 @@ class DesktopApi:
                 raise RuntimeError("桌面运行时尚未准备完成。")
             return {"ok": True, "state": self._desktop_state(self._coordinator.stop_from_ui().state)}
         except Exception as exc:
+            _logger.warning("停止服务失败", exc_info=True)
             return {"ok": False, "error": f"停止服务失败：{exc}"}
 
     def reset_deadline(self) -> dict[str, object]:
@@ -172,6 +278,7 @@ class DesktopApi:
         try:
             return {"ok": True, "state": self._desktop_state(self._controller.refresh_diagnostics())}
         except Exception as exc:
+            _logger.warning("无法刷新诊断", exc_info=True)
             return {"ok": False, "error": f"无法刷新诊断：{exc}"}
 
     def open_windows_settings(self, target: str) -> dict[str, object]:
@@ -202,6 +309,7 @@ class DesktopApi:
         try:
             return {"ok": True, "text": _diagnostic_report(self._controller.snapshot())}
         except Exception as exc:
+            _logger.warning("无法生成诊断信息", exc_info=True)
             return {"ok": False, "error": f"无法生成诊断信息：{exc}"}
 
     def list_trusted_clients(self) -> dict[str, object]:
@@ -247,7 +355,7 @@ class DesktopApi:
 class _WindowDispatcher:
     """Centralize every pywebview window mutation away from callback threads."""
 
-    def __init__(self, window: Any) -> None:
+    def __init__(self, window: _DesktopWindow) -> None:
         self._window = window
 
     def hide_window(self) -> None:
@@ -289,7 +397,7 @@ def main(argv: list[str] | None = None) -> int:
     # Ordinary startup enters the maintenance gate before importing the GUI
     # runtime or creating any normal application state.
     try:
-        single_instance, is_primary = _acquire_desktop_startup_ownership(data_directory)
+        single_instance, is_primary = acquire_desktop_startup_ownership(data_directory)
     except (
         InstallContractError,
         InstallLifecycleLockError,
@@ -368,34 +476,45 @@ def main(argv: list[str] | None = None) -> int:
         emit_performance_timings=args.debug,
     )
     api = DesktopApi(controller, credentials, webview, settings_store)
-    entry = _desktop_entry_path()
-    window = webview.create_window(
+    entry = desktop_entry_path()
+    # pywebview's published annotations contain partially unknown parameters;
+    # keep that limitation at this single adapter boundary.
+    webview_runtime = cast(_WebviewRuntime, webview)
+    window = webview_runtime.create_window(
         "LanDrop",
         url=entry.as_uri(),
         js_api=api,
         width=1180,
         height=840,
         min_size=(900, 650),
-        **_desktop_window_visibility(args.startup),
+        hidden=args.startup,
+        focus=not args.startup,
         background_color="#eaf2fb",
         text_select=True,
     )
+    if window is None:
+        raise RuntimeError("pywebview 未能创建 LanDrop 主窗口。")
     api.attach_window(window)
     window_dispatcher = _WindowDispatcher(window)
     coordinator = ActionCoordinator(controller, window_dispatcher)
     api.attach_coordinator(coordinator)
     single_instance.set_activate_callback(coordinator.submit_show_window)
-    toasts = WindowsToastBackend(
-        lambda action, session_id, revision: coordinator.submit_toast_action(
+    def handle_toast_action(
+        action: str,
+        session_id: str,
+        deadline_revision: int,
+    ) -> None:
+        coordinator.submit_toast_action(
             action,
             session_id=session_id,
-            deadline_revision=revision,
+            deadline_revision=deadline_revision,
         )
-    )
+
+    toasts = WindowsToastBackend(handle_toast_action)
     try:
         toasts.start()
     except Exception as exc:
-        logger.warning("Windows Toast 不可用：%s", exc)
+        logger.warning("Windows Toast 不可用：%s", exc, exc_info=True)
     else:
         coordinator.bind_toasts(toasts)
         coordinator.start_expiry_monitor(
@@ -403,11 +522,20 @@ def main(argv: list[str] | None = None) -> int:
             toasts.send_service_stopped,
         )
 
+    def open_window() -> None:
+        coordinator.submit_show_window()
+
+    def reset_service() -> None:
+        coordinator.reset_from_tray()
+
+    def stop_service() -> None:
+        coordinator.stop_from_ui()
+
     tray = LanDropTray(
         state_provider=controller.snapshot,
-        open_window=coordinator.submit_show_window,
-        reset=coordinator.reset_from_tray,
-        stop_service=coordinator.stop_from_ui,
+        open_window=open_window,
+        reset=reset_service,
+        stop_service=stop_service,
         exit_application=lambda: coordinator.request_exit("app_exit"),
     )
     coordinator.bind_tray(tray)
@@ -422,7 +550,7 @@ def main(argv: list[str] | None = None) -> int:
 
     window.events.closing += on_window_closing
     try:
-        webview.start(icon=str(resource_path("assets/LanDrop.ico")))
+        webview_runtime.start(icon=str(resource_path("assets/LanDrop.ico")))
     finally:
         coordinator.request_exit("app_exit")
         single_instance.close()
@@ -430,25 +558,23 @@ def main(argv: list[str] | None = None) -> int:
     return 0
 
 
-def _diagnostic_report(snapshot: Any) -> str:
-    state = snapshot.to_dict()
-    diagnostics = state.get("diagnostics") or {}
-    network = diagnostics.get("network") or {}
-    firewall = diagnostics.get("firewall") or {}
-    interfaces = []
-    for item in network.get("interfaces") or []:
-        interfaces.append(
-            {
-                "alias": item.get("alias", ""),
-                "network_name": item.get("description", ""),
-                "interface_index": item.get("interface_index", 0),
-                "ipv4": item.get("address", ""),
-                "category": item.get("category", "Unknown"),
-                "role": item.get("role", ""),
-            }
-        )
-    evidence = []
-    for item in firewall.get("evidence") or []:
+def _diagnostic_report(snapshot: ServiceSnapshot) -> str:
+    diagnostics = snapshot.diagnostics or {}
+    network = _object_dict(diagnostics.get("network"))
+    firewall = _object_dict(diagnostics.get("firewall"))
+    interfaces = [
+        {
+            "alias": item.get("alias", ""),
+            "network_name": item.get("description", ""),
+            "interface_index": item.get("interface_index", 0),
+            "ipv4": item.get("address", ""),
+            "category": item.get("category", "Unknown"),
+            "role": item.get("role", ""),
+        }
+        for item in _object_dicts(network.get("interfaces"))
+    ]
+    evidence: list[dict[str, object]] = []
+    for item in _object_dicts(firewall.get("evidence")):
         program = str(item.get("program") or "Any")
         evidence.append(
             {
@@ -465,19 +591,19 @@ def _diagnostic_report(snapshot: Any) -> str:
         "landrop_version": __version__,
         "platform": f"{platform.system()} {platform.release()}",
         "service": {
-            "running": state.get("running", False),
-            "phase": state.get("phase", ""),
-            "message": state.get("message", ""),
-            "stop_reason": state.get("stop_reason", ""),
+            "running": snapshot.running,
+            "phase": snapshot.phase,
+            "message": snapshot.message,
+            "stop_reason": snapshot.stop_reason,
         },
         "endpoint": {
-            "interface": state.get("interface", ""),
-            "network_name": state.get("network_name", ""),
-            "interface_index": state.get("interface_index", 0),
-            "ipv4": state.get("bound_ipv4", ""),
-            "category": state.get("network_category", ""),
-            "status": state.get("endpoint_status", ""),
-            "detail": state.get("endpoint_detail", ""),
+            "interface": snapshot.interface,
+            "network_name": snapshot.network_name,
+            "interface_index": snapshot.interface_index,
+            "ipv4": snapshot.bound_ipv4,
+            "category": snapshot.network_category,
+            "status": snapshot.endpoint_status,
+            "detail": snapshot.endpoint_detail,
         },
         "diagnostics": {
             "status": diagnostics.get("status", "idle"),
@@ -514,6 +640,34 @@ def _existing_gui_directory(value: object, label: str) -> Path:
     return path
 
 
+def _integer_option(value: object, *, default: int) -> int:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        raise TypeError("整数设置不能是布尔值。")
+    if isinstance(value, int | float | str | bytes | bytearray):
+        return int(value)
+    raise TypeError("整数设置格式无效。")
+
+
+def _is_object_dict(value: object) -> TypeGuard[dict[str, object]]:
+    return isinstance(value, dict)
+
+
+def _object_dict(value: object) -> dict[str, object]:
+    return value if _is_object_dict(value) else {}
+
+
+def _is_object_list(value: object) -> TypeGuard[list[object]]:
+    return isinstance(value, list)
+
+
+def _object_dicts(value: object) -> list[dict[str, object]]:
+    if not _is_object_list(value):
+        return []
+    return [item for item in value if _is_object_dict(item)]
+
+
 def _show_native_error(message: str) -> None:
     try:
         ctypes.windll.user32.MessageBoxW(None, message, "LanDrop", 0x10)  # type: ignore[attr-defined]
@@ -521,27 +675,22 @@ def _show_native_error(message: str) -> None:
         print(message, file=sys.stderr)
 
 
-def _desktop_entry_path() -> Path:
+def desktop_entry_path() -> Path:
     entry = resource_path("ui/desktop/index.html")
     if not entry.is_file():
         raise RuntimeError(f"LanDrop 桌面界面资源不存在：{entry}")
     return entry
 
 
-def _desktop_window_visibility(startup: bool) -> dict[str, bool]:
-    """Keep the only pywebview Window alive but hidden for HKCU Run startup."""
-    return {"hidden": startup, "focus": not startup}
-
-
-def _acquire_desktop_startup_ownership(
+def acquire_desktop_startup_ownership(
     data_directory: Path,
     *,
     install_paths: InstallPaths | None = None,
-    lifecycle_lock: InstallLifecycleLock | None = None,
-    state_store: InstallationStateStore | None = None,
-    single_instance: DesktopSingleInstance | None = None,
-    cleanup_retry: Any | None = None,
-) -> tuple[DesktopSingleInstance, bool]:
+    lifecycle_lock: _InstallLifecycleActions | None = None,
+    state_store: _InstallationStateActions | None = None,
+    single_instance: _DesktopOwnership | None = None,
+    cleanup_retry: Callable[[], object] | None = None,
+) -> tuple[_DesktopOwnership, bool]:
     """Pass the maintenance gate, then establish ordinary desktop ownership.
 
     ``--self-check`` never calls this function.  The lifecycle lock remains held
@@ -571,36 +720,36 @@ def _acquire_desktop_startup_ownership(
         maintenance_lock.close()
 
 
-def _portable_self_check(logger: Any) -> int:
+def _portable_self_check(logger: logging.Logger) -> int:
     try:
+        from importlib import import_module
         from importlib.metadata import version
 
         runtime_version = webview2_runtime_version()
         if not runtime_version:
             raise RuntimeError("未检测到 Microsoft Edge WebView2 Runtime")
-        import pystray  # noqa: F401
-        import qrcode  # noqa: F401
-        import webview  # noqa: F401
-        import windows_toasts  # noqa: F401
         from PIL import Image
+
+        for module_name in ("pystray", "qrcode", "webview", "windows_toasts"):
+            import_module(module_name)
 
         icon_path = resource_path("assets/LanDrop.ico")
         with Image.open(icon_path) as icon:
-            if icon.convert("RGBA").getextrema()[3][0] != 0:
+            if icon.convert("RGBA").getchannel("A").getextrema()[0] != 0:
                 raise RuntimeError("产品图标缺少透明圆角")
         product_preview_path = resource_path("assets/LanDrop-icon-preview.png")
         with Image.open(product_preview_path) as product_preview:
-            if product_preview.convert("RGBA").getextrema()[3][0] != 0:
+            if product_preview.convert("RGBA").getchannel("A").getextrema()[0] != 0:
                 raise RuntimeError("桌面产品图缺少透明圆角")
         tray_icon_path = resource_path("assets/LanDrop-tray.ico")
         with Image.open(tray_icon_path) as tray_icon:
-            if tray_icon.convert("RGBA").getextrema()[3][0] != 0:
+            if tray_icon.convert("RGBA").getchannel("A").getextrema()[0] != 0:
                 raise RuntimeError("托盘图标缺少透明背景")
         qr_sample = qr_png_data_uri("http://192.168.50.1:8000/pair/qr#self-check")
         if not qr_sample.startswith("data:image/png;base64,"):
             raise RuntimeError("本地二维码渲染自检失败")
         desktop_resources = (
-            _desktop_entry_path(),
+            desktop_entry_path(),
             resource_path("ui/desktop/css/tokens.css"),
             resource_path("ui/desktop/css/shell.css"),
             resource_path("ui/desktop/css/components.css"),

@@ -1,10 +1,12 @@
 from __future__ import annotations
 
-from pathlib import Path
+import json
 import unittest
+from pathlib import Path
+
+from support import temporary_directory
 
 from landrop.trust import CredentialStore, describe_user_agent
-from support import temporary_directory
 
 
 class CredentialStoreTests(unittest.TestCase):
@@ -73,18 +75,25 @@ class CredentialStoreTests(unittest.TestCase):
     def test_hides_legacy_android_model_behind_generic_label(self) -> None:
         with temporary_directory() as temporary:
             store = CredentialStore(Path(temporary))
-            store._save(
-                [
+            store.path.write_text(
+                json.dumps(
                     {
-                        "client_id": "legacy-client",
-                        "label": "23116PN5BC",
-                        "created_at": "2026-09-16T00:00:00+00:00",
-                        "device_type": "手机",
-                        "operating_system": "Android 16",
-                        "browser": "Google Chrome 152",
-                        "token_hash": "unused",
-                    }
-                ]
+                        "version": 3,
+                        "clients": [
+                            {
+                                "client_id": "legacy-client",
+                                "label": "23116PN5BC",
+                                "created_at": "2026-09-16T00:00:00+00:00",
+                                "device_type": "手机",
+                                "operating_system": "Android 16",
+                                "browser": "Google Chrome 152",
+                                "token_hash": "unused",
+                            }
+                        ],
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
             )
             client = store.list_clients()[0]
             self.assertEqual(client.label, "Android 手机")

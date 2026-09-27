@@ -2,10 +2,9 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import contextlib
 import errno
 import os
-from pathlib import Path
 import re
 import secrets
 import shutil
@@ -13,8 +12,10 @@ import stat
 import threading
 import time
 import unicodedata
-from typing import BinaryIO, Callable
-
+from collections.abc import Callable
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Protocol
 
 COPY_CHUNK_SIZE = 1024 * 1024
 MINIMUM_FREE_SPACE = 10 * 1024 * 1024
@@ -72,6 +73,10 @@ class PartCleanupResult:
     errors: tuple[str, ...]
 
 
+class BinaryReader(Protocol):
+    def read(self, size: int = -1, /) -> bytes: ...
+
+
 def sanitize_filename(raw_filename: str) -> str:
     """Return one Windows-safe basename while preserving useful Unicode."""
     if not raw_filename or not raw_filename.strip():
@@ -109,7 +114,7 @@ def ensure_free_space(directory: Path, expected_bytes: int) -> None:
 
 
 def save_upload(
-    source: BinaryIO,
+    source: BinaryReader,
     raw_filename: str,
     receive_directory: Path,
     max_bytes: int,
@@ -151,10 +156,8 @@ def save_upload(
             raise InsufficientSpaceError("写入过程中磁盘空间不足。") from exc
         raise StorageError(f"无法保存上传文件：{exc}") from exc
     finally:
-        try:
+        with contextlib.suppress(OSError):
             part_path.unlink(missing_ok=True)
-        except OSError:
-            pass
 
 
 def cleanup_orphaned_upload_parts(

@@ -5,17 +5,23 @@ from __future__ import annotations
 import argparse
 import ctypes
 import logging
-from logging.handlers import RotatingFileHandler
 import os
-from pathlib import Path
 import sys
 import threading
-from typing import Any
+from collections.abc import Callable
+from logging.handlers import RotatingFileHandler
+from pathlib import Path
+from typing import Protocol, Self, cast
 
 from .app_logging import install_exception_hooks
 from .install_contract import InstallPaths, install_paths_for_current_windows_user
 from .installer import FirstInstallOptions, FirstInstallOutcome, FirstInstallService
-from .payload_manifest import PayloadManifest, read_payload_manifest, verify_payload
+from .payload_manifest import (
+    PayloadManifest,
+    PayloadManifestError,
+    read_payload_manifest,
+    verify_payload,
+)
 from .platform_checks import webview2_runtime_version
 from .resources import resource_path
 from .system_integration import PowerShellShortcutBackend, WindowsFirstInstallIntegration
@@ -24,6 +30,37 @@ from .upgrade import UpgradeOutcome, UpgradeService, inspect_setup_state
 
 class SetupBundleError(RuntimeError):
     """The onefile Setup bundle is incomplete or inconsistent."""
+
+
+class _ClosingEvent(Protocol):
+    def __iadd__(self, handler: Callable[[], bool]) -> Self: ...
+
+
+class _WindowEvents(Protocol):
+    closing: _ClosingEvent
+
+
+class _SetupWindow(Protocol):
+    events: _WindowEvents
+
+    def destroy(self) -> None: ...
+
+
+class _WebviewRuntime(Protocol):
+    def create_window(
+        self,
+        title: str,
+        *,
+        url: str,
+        js_api: object,
+        width: int,
+        height: int,
+        min_size: tuple[int, int],
+        resizable: bool,
+        background_color: str,
+    ) -> _SetupWindow | None: ...
+
+    def start(self, *, gui: str, debug: bool, private_mode: bool) -> None: ...
 
 
 class SetupBundle:
@@ -77,7 +114,7 @@ class SetupRuntime:
         self,
         *,
         desktop_shortcut: bool,
-        progress,
+        progress: Callable[[str], None],
     ) -> FirstInstallOutcome | UpgradeOutcome:
         inspection = self.inspect()
         integration = self._integration()
@@ -128,10 +165,10 @@ class SetupApi:
         self._logger = logger or logging.getLogger("landrop.setup")
         self._guard = threading.Lock()
         self._state_lock = threading.Lock()
-        self._operation: dict[str, Any] | None = None
-        self._window: Any | None = None
+        self._operation: dict[str, object] | None = None
+        self._window: _SetupWindow | None = None
 
-    def attach_window(self, window: Any) -> None:
+    def attach_window(self, window: _SetupWindow) -> None:
         self._window = window
 
     def get_status(self) -> dict[str, object]:
@@ -246,22 +283,22 @@ def main(argv: list[str] | None = None) -> int:
     if args.self_check:
         try:
             manifest = SetupBundle().validate()
-        except Exception as exc:
+        except (OSError, PayloadManifestError, SetupBundleError) as exc:
             _show_native_error(f"LanDrop Setup 自检失败：{exc}")
             return 3
         return 0 if manifest.files else 3
 
     try:
         paths = install_paths_for_current_windows_user()
-        logger = _configure_setup_logging(paths.data_root)
-    except Exception as exc:
+        logger = configure_setup_logging(paths.data_root)
+    except OSError as exc:
         _show_native_error(f"LanDrop Setup 无法初始化诊断日志：{exc}")
         return 3
     restore_exception_hooks = install_exception_hooks(logger)
     try:
         bundle = SetupBundle()
         bundle.validate()
-    except Exception as exc:
+    except (OSError, PayloadManifestError, SetupBundleError) as exc:
         logger.exception("Setup bundle validation failed")
         _show_native_error(f"LanDrop Setup 自检失败：{exc}")
         restore_exception_hooks()
@@ -278,7 +315,8 @@ def main(argv: list[str] | None = None) -> int:
     try:
         runtime = SetupRuntime(bundle=bundle, paths=paths)
         api = SetupApi(runtime, logger=logger)
-        window = webview.create_window(
+        webview_runtime = cast(_WebviewRuntime, webview)
+        window = webview_runtime.create_window(
             "安装 LanDrop",
             url=bundle.ui_entry.as_uri(),
             js_api=api,
@@ -288,9 +326,11 @@ def main(argv: list[str] | None = None) -> int:
             resizable=True,
             background_color="#eaf5ff",
         )
+        if window is None:
+            raise RuntimeError("pywebview 未能创建 Setup 窗口。")
         api.attach_window(window)
         window.events.closing += lambda: bool(api.can_close()["allowed"])
-        webview.start(gui="edgechromium", debug=False, private_mode=True)
+        webview_runtime.start(gui="edgechromium", debug=False, private_mode=True)
         return 0
     except Exception as exc:
         logger.exception("Unhandled Setup UI failure")
@@ -300,7 +340,7 @@ def main(argv: list[str] | None = None) -> int:
         restore_exception_hooks()
 
 
-def _configure_setup_logging(data_directory: Path) -> logging.Logger:
+def configure_setup_logging(data_directory: Path) -> logging.Logger:
     log_directory = Path(data_directory) / "logs"
     log_directory.mkdir(parents=True, exist_ok=True)
     logger = logging.getLogger("landrop.setup")

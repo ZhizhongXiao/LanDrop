@@ -1,20 +1,21 @@
 from __future__ import annotations
 
-from io import BytesIO
 import os
-from pathlib import Path
 import time
 import unittest
+from io import BytesIO
+from pathlib import Path
+
+from support import temporary_directory
 
 from landrop.storage import (
-    cleanup_orphaned_upload_parts,
     InvalidFilenameError,
     UploadTooLargeError,
+    cleanup_orphaned_upload_parts,
     resolve_shared_file,
     sanitize_filename,
     save_upload,
 )
-from support import temporary_directory
 
 
 class FilenameTests(unittest.TestCase):

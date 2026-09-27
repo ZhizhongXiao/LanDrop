@@ -2,15 +2,16 @@
 
 from __future__ import annotations
 
+import contextlib
 import ctypes
-from ctypes import wintypes
-from dataclasses import dataclass
 import json
 import os
-from pathlib import Path
 import secrets
 import uuid
-
+from ctypes import wintypes
+from dataclasses import dataclass
+from pathlib import Path
+from typing import cast
 
 CONFIG_VERSION = 1
 DEFAULT_MAX_UPLOAD_MB = 1000
@@ -85,12 +86,11 @@ class SettingsStore:
         if not self.path.exists():
             return self.defaults
         try:
-            raw = json.loads(self.path.read_text(encoding="utf-8"))
-            if not isinstance(raw, dict):
-                raise ValueError("配置根节点必须是 JSON 对象")
+            parsed: object = json.loads(self.path.read_text(encoding="utf-8"))
+            raw = _json_object(parsed)
             version = raw.get("version", CONFIG_VERSION)
             if isinstance(version, bool) or not isinstance(version, int):
-                raise ValueError("配置版本必须是整数")
+                raise TypeError("配置版本必须是整数")
             if version != CONFIG_VERSION:
                 raise ValueError(f"不支持的配置版本：{version}")
             return AppSettings(
@@ -108,6 +108,7 @@ class SettingsStore:
             OSError,
             UnicodeError,
             json.JSONDecodeError,
+            TypeError,
             ValueError,
             SettingsError,
         ) as exc:
@@ -132,10 +133,8 @@ class SettingsStore:
         except OSError as exc:
             raise SettingsError(f"无法保存 LanDrop 设置：{exc}") from exc
         finally:
-            try:
+            with contextlib.suppress(OSError):
                 temporary.unlink(missing_ok=True)
-            except OSError:
-                pass
 
     def ensure_default_directories(self, settings: AppSettings | None = None) -> None:
         """Create only the app-owned default directories when they are selected."""
@@ -154,7 +153,9 @@ class SettingsStore:
 def _configured_path(value: object, fallback: Path) -> Path:
     if value is None:
         return fallback
-    if not isinstance(value, str) or not value.strip():
+    if not isinstance(value, str):
+        raise TypeError("目录设置必须是字符串")
+    if not value.strip():
         raise ValueError("目录设置必须是非空字符串")
     candidate = Path(value).expanduser()
     if not candidate.is_absolute():
@@ -166,7 +167,7 @@ def _configured_limit(value: object, fallback: int) -> int:
     if value is None:
         return fallback
     if isinstance(value, bool) or not isinstance(value, int):
-        raise ValueError("上传上限必须是整数")
+        raise TypeError("上传上限必须是整数")
     return _required_limit(value)
 
 
@@ -178,11 +179,20 @@ def _required_absolute_path(value: Path, label: str) -> Path:
 
 
 def _required_limit(value: int) -> int:
-    if isinstance(value, bool) or not isinstance(value, int):
+    if isinstance(value, bool):
         raise SettingsError("上传上限必须是整数。")
     if not MIN_UPLOAD_MB <= value <= MAX_UPLOAD_MB:
         raise SettingsError(f"上传上限必须在 {MIN_UPLOAD_MB} 到 {MAX_UPLOAD_MB} MB 之间。")
     return value
+
+
+def _json_object(value: object) -> dict[str, object]:
+    if not isinstance(value, dict):
+        raise TypeError("配置根节点必须是 JSON 对象")
+    raw = cast(dict[object, object], value)
+    if any(not isinstance(key, str) for key in raw):
+        raise TypeError("配置字段名必须是字符串")
+    return {cast(str, key): child for key, child in raw.items()}
 
 
 def _same_path(left: Path, right: Path) -> bool:

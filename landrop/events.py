@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
 import json
 import logging
+import threading
+from datetime import UTC, datetime
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
-import threading
-from typing import Any
+
+from .lifecycle import LifecycleSnapshot
 
 
 class SessionEventLog:
@@ -27,7 +28,7 @@ class SessionEventLog:
 
     def record(
         self,
-        lifecycle: Any,
+        lifecycle: LifecycleSnapshot,
         *,
         started_at: str,
         duration_seconds: float,
@@ -37,7 +38,7 @@ class SessionEventLog:
             "version": 2,
             "session_id": lifecycle.session_id,
             "started_at": started_at,
-            "stopped_at": datetime.now(timezone.utc).isoformat(),
+            "stopped_at": datetime.now(UTC).isoformat(),
             "configured_duration_seconds": duration_seconds,
             "configured_grace_seconds": grace_seconds,
             "stop_reason": lifecycle.stop_reason,

@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field
 import math
 import secrets
 import threading
 import time
 import uuid
-from typing import Callable
+from collections.abc import Callable
+from dataclasses import asdict, dataclass, field
 
 
 class SessionExpiredError(RuntimeError):
@@ -36,10 +36,12 @@ class _ActiveTransfer:
 class _DownloadTask:
     started_at: float
     expected_size: int
-    completed_ranges: list[tuple[int, int]] = field(default_factory=list)
+    completed_ranges: list[tuple[int, int]] = field(
+        default_factory=list[tuple[int, int]]
+    )
     active_streams: int = 0
     last_failure_reason: str = ""
-    stream_failures: dict[str, int] = field(default_factory=dict)
+    stream_failures: dict[str, int] = field(default_factory=dict[str, int])
     finalized: bool = False
 
 
@@ -58,10 +60,10 @@ class SessionStatistics:
     uploaded_bytes: int = 0
     completed_transfer_seconds: float = 0.0
     rejected_expired_requests: int = 0
-    failures: dict[str, int] = field(default_factory=dict)
-    stream_failures: dict[str, int] = field(default_factory=dict)
-    stream_cancellations: dict[str, int] = field(default_factory=dict)
-    rejections: dict[str, int] = field(default_factory=dict)
+    failures: dict[str, int] = field(default_factory=dict[str, int])
+    stream_failures: dict[str, int] = field(default_factory=dict[str, int])
+    stream_cancellations: dict[str, int] = field(default_factory=dict[str, int])
+    rejections: dict[str, int] = field(default_factory=dict[str, int])
 
     def to_dict(self) -> dict[str, object]:
         result = asdict(self)
@@ -128,7 +130,7 @@ class TransferHandle:
     def add_bytes(self, amount: int) -> None:
         if amount <= 0:
             return
-        self._lifecycle._add_bytes(self._transfer_id, amount)
+        self._lifecycle.record_transfer_bytes(self._transfer_id, amount)
 
     def check_cancelled(self) -> None:
         reason = self._lifecycle.cancel_reason()
@@ -140,14 +142,14 @@ class TransferHandle:
             if self._finished:
                 return
             self._finished = True
-        self._lifecycle._finish_transfer(self._transfer_id, None)
+        self._lifecycle.finish_transfer(self._transfer_id, None)
 
     def fail(self, reason: str) -> None:
         with self._lock:
             if self._finished:
                 return
             self._finished = True
-        self._lifecycle._finish_transfer(self._transfer_id, reason)
+        self._lifecycle.finish_transfer(self._transfer_id, reason)
 
 
 class SessionLifecycle:
@@ -351,8 +353,7 @@ class SessionLifecycle:
                     download_id,
                     _DownloadTask(now, max(0, expected_size)),
                 )
-                if expected_size > task.expected_size:
-                    task.expected_size = expected_size
+                task.expected_size = max(task.expected_size, expected_size)
                 task.active_streams += 1
             self._active[transfer_id] = _ActiveTransfer(
                 kind=kind,
@@ -371,7 +372,7 @@ class SessionLifecycle:
         with self._lock:
             return self._cancel_reason
 
-    def _add_bytes(self, transfer_id: str, amount: int) -> None:
+    def record_transfer_bytes(self, transfer_id: str, amount: int) -> None:
         with self._lock:
             if self._cancel_reason:
                 raise TransferCancelledError(self._cancel_reason)
@@ -379,7 +380,7 @@ class SessionLifecycle:
             if transfer is not None:
                 transfer.byte_count += amount
 
-    def _finish_transfer(self, transfer_id: str, failure_reason: str | None) -> None:
+    def finish_transfer(self, transfer_id: str, failure_reason: str | None) -> None:
         with self._lock:
             transfer = self._active.pop(transfer_id, None)
             if transfer is None:
@@ -546,7 +547,7 @@ class SessionLifecycle:
 
 
 def _covered_bytes(ranges: list[tuple[int, int]], expected_size: int) -> int:
-    normalized = []
+    normalized: list[tuple[int, int]] = []
     upper_bound = expected_size if expected_size > 0 else None
     for start, end in ranges:
         start = max(0, start)
