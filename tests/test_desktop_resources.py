@@ -60,6 +60,7 @@ class DesktopResourceTests(unittest.TestCase):
         self.assertIn('"ui"', spec)
         self.assertIn('project_root / "assets" / "LanDrop-icon-preview.png"', spec)
         self.assertIn('project_root / "assets" / "LanDrop-tray.ico"', spec)
+        self.assertIn('collect_submodules("pystray")', spec)
 
         requirements = (PROJECT_ROOT / "requirements.txt").read_text(encoding="utf-8")
         self.assertIn("qrcode[pil]==8.2", requirements)

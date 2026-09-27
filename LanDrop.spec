@@ -13,7 +13,11 @@ datas = [
     (str(project_root / "ui"), "ui"),
 ]
 binaries = []
-hiddenimports = collect_submodules("windows_toasts") + collect_submodules("winrt")
+hiddenimports = (
+    collect_submodules("pystray")
+    + collect_submodules("windows_toasts")
+    + collect_submodules("winrt")
+)
 
 analysis = Analysis(
     [str(project_root / "desktop.py")],
