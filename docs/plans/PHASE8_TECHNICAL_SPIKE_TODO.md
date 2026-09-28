@@ -1,19 +1,22 @@
 # 第八阶段详细计划：安装器、卸载器与分发
 
-状态：**Phase 8A～8E 开发实现、自动化回归和本机真实安装生命周期开发验收通过；RC1～RC5 已被取代；RC6 已从干净提交 `d79a89a` 构建并冻结，后续验证提交 `7031175` 上全量回归 197/197 通过；Phase 8F 干净 Windows 11 最终发布验收尚未完成（2026-09-28）**。
+状态：**Phase 8A～8E 开发实现、自动化回归和本机真实安装生命周期开发验收通过；RC1～RC6 已被取代；RC7 已从源码提交 `6feb6aa` 构建并冻结，198/198 全量回归通过；Phase 8F 干净 Windows 11 最终发布验收尚未完成（2026-09-28）**。
 
-资源边界更新（2026-09-28）：LAN 与 loopback 共用最多 16 个 HTTP worker slot，accepted socket 单次 I/O 空闲超时 30 秒；`/upload` 和 `/upload/raw` 共用最多 2 个并发上传 slot，第三个请求立即返回 HTTP 429 与 `Retry-After: 2`；进程内空间 reservation 从实际空闲空间中扣除已承诺上传字节，并只保留一次 10 MiB 安全余量，所有成功、失败和异常路径均释放。multipart 在取得 slot 与空间 reservation 前不读取 forms/files。实现保留 Bottle/wsgiref，不改变协议、Range、SessionLifecycle、5 分钟 session 或 60 秒 grace。它限制无界资源增长，但持续恶意连接仍可占满 16 个 slot 并暂时导致拒绝服务；不宣称为通用 DoS 防护。相关全量回归共 193 项通过；RC6 仍须从干净提交构建。
+资源边界更新（2026-09-28）：LAN 与 loopback 共用最多 16 个 HTTP worker slot，accepted socket 单次 I/O 空闲超时 30 秒；`/upload` 和 `/upload/raw` 共用最多 2 个并发上传 slot，第三个请求立即返回 HTTP 429 与 `Retry-After: 2`；进程内空间 reservation 从实际空闲空间中扣除已承诺上传字节，并只保留一次 10 MiB 安全余量，所有成功、失败和异常路径均释放。multipart 在取得 slot 与空间 reservation 前不读取 forms/files。实现保留 Bottle/wsgiref，不改变协议、Range、SessionLifecycle、5 分钟 session 或 60 秒 grace。它限制无界资源增长，但持续恶意连接仍可占满 16 个 slot 并暂时导致拒绝服务；不宣称为通用 DoS 防护。完整回归共 198 项通过。
 
-RC6 冻结记录：详见 `docs/releases/0.6.0-rc6.md`。Build ID 为 `0.6.0-d79a89a-20260928023756`；冻结产物位于 `C:\Projects\LanDrop-ReleaseCandidates\0.6.0-rc6-d79a89a`，Setup / Uninstall / 主程序 onedir 自检全部通过。本条取代上方资源边界更新末句“RC6 仍须从干净提交构建”，也取代下方较早实施进度行中的“RC6 尚未构建”和“HTTP 资源风险开放”描述。该候选仅供 Phase 8F 使用，干净 Windows 11 最终发布验收仍为 pending。
+RC6 已于最终发布验收前被 RC7 取代；历史构建记录保留在 `docs/releases/0.6.0-rc6.md`，不得用于 Phase 8F。
 
-后续验证记录：`70311758e9af5247b90afc72c1c68ccc00bac12a` 只增强测试代码，不修改应用源码和已冻结二进制；停滞连接 timeout/slot 释放及容量不足、ENOSPC、StorageError、客户端断开、session stop 后上传资源释放均有明确回归覆盖。该提交上的全量回归为 197/197，取代本段之前的 193 项计数。
+RC7 冻结记录：详见 `docs/releases/0.6.0-rc7.md`。Build ID 为 `0.6.0-6feb6aa-20260928035021`；冻结产物位于 `C:\Projects\LanDrop-ReleaseCandidates\0.6.0-rc7-6feb6aa`，Setup / Uninstall / 主程序 onedir 自检全部通过。RC7 加入 Windows 多扩展名保留设备名修复。该候选仅供 Phase 8F 使用，干净 Windows 11 最终发布验收仍为 pending。
 
-实施进度（2026-09-28）：安装契约、生命周期锁、权威状态、首次安装、事务升级/回滚、`pending_cleanup`、临时 Uninstall 迁出、绑定 request、精确系统对象移除及用户数据白名单清理均已落地。实机暴露的 onefile TEMP 自清理时序、`StartupApproved` 派生状态残留和临时卸载页本地资源定位问题均已完成针对性修复。可信客户机容量为 3 台，凭据服务端有效期为 5 天；新记录写入 `expires_at`，旧记录按 `created_at` 收紧并过期惰性清理。RC5 仍包含 20 台 / 365 天策略，已被取代；RC6 尚未构建。启动时不再使用 WLAN Registry SSID 猜测 fallback，profile 查询失败返回 `Unknown` 并拒绝启动。Python 3.12 x64 + PyInstaller 6.22.3 生成的主程序 `--onedir`、Uninstall `--onefile --windowed` 和 Setup `--onefile --windowed` 曾通过 RC5 自检，但该产物不代表当前策略。本机已完整走通此前 A 首装、升级、传输和卸载生命周期；Phase 8F 干净 Windows 11 最终发布验收仍未完成。HTTP 连接并发、慢请求和上传空间 reservation 仍属开放风险。Phase 8 development acceptance 为 PASS；Phase 8F final release acceptance 仍为 NOT YET COMPLETE。
+后续验证记录：`70311758e9af5247b90afc72c1c68ccc00bac12a` 只增强测试代码，不修改当时已冻结的 RC6 二进制；停滞连接 timeout/slot 释放及容量不足、ENOSPC、StorageError、客户端断开、session stop 后上传资源释放均有明确回归覆盖。文件名修复提交 `6feb6aa` 补充多扩展名设备名及 COM/LPT 上标数字测试；RC7 源码上的全量回归为 198/198。
+
+实施进度（2026-09-28）：安装契约、生命周期锁、权威状态、首次安装、事务升级/回滚、`pending_cleanup`、临时 Uninstall 迁出、绑定 request、精确系统对象移除及用户数据白名单清理均已落地。实机暴露的 onefile TEMP 自清理时序、`StartupApproved` 派生状态残留和临时卸载页本地资源定位问题均已完成针对性修复。可信客户机容量为 3 台，凭据服务端有效期为 5 天；新记录写入 `expires_at`，旧记录按 `created_at` 收紧并过期惰性清理。启动时不使用 WLAN Registry SSID 猜测 fallback，profile 查询失败返回 `Unknown` 并拒绝启动。HTTP worker、socket idle、并发上传和磁盘 reservation 边界已实现并通过回归。Windows 文件名清理现按首个扩展名分隔点前的 root 检测保留设备名，并覆盖 COM/LPT 上标数字。RC7 从提交 `6feb6aa` 构建，Build ID 为 `0.6.0-6feb6aa-20260928035021`，198/198 回归通过；Phase 8F 干净 Windows 11 最终发布验收仍未完成。Phase 8 development acceptance 为 PASS；Phase 8F final release acceptance 仍为 NOT YET COMPLETE。
 
 > 0.6.0-rc1 was superseded before final release acceptance by post-RC1 UI/behavior changes.
 > 0.6.0-rc3 was superseded before final release acceptance by repository-wide static governance and its packaging compatibility fix.
 > 0.6.0-rc4 was superseded before final release acceptance by startup network fail-closed and server-enforced credential expiry fixes.
 > 0.6.0-rc5 was superseded before final release acceptance by the 3-client / 5-day trust policy change.
+> 0.6.0-rc6 was superseded before final release acceptance by the Windows reserved multi-extension filename fix.
 
 前置条件：第七阶段开发验收已通过并冻结为第八阶段基线。当前已有 Python 3.12 x64 + PyInstaller 6.22.3 `--onedir` 主程序构建、统一资源定位、单实例、WebView2 Runtime 检查、滚动日志、托盘/Toast、Private/Public 网络边界及 94 项自动化回归证据。第七阶段正式无 Python/无源码干净 Windows 11 验收因测试机暂不可用而延期，必须在第八阶段最终发布验收中一并补齐。
 
@@ -863,7 +866,7 @@ Phase 8E 最终功能基线提交：`22d77ebe4e251aeeb6cd97a734ccb2978ac853e2`�
 
 ## 十、Phase 8F：干净 Windows 11 最终发布验收
 
-当前用于 P8-R01～R04 的唯一冻结候选为 RC6：见 `docs/releases/0.6.0-rc6.md`。RC5 采用 20 台 / 365 天旧策略且缺少 HTTP/上传资源边界补丁，不得使用。
+当前用于 P8-R01～R04 的唯一冻结候选为 RC7：见 `docs/releases/0.6.0-rc7.md`。RC6 及更早候选均已被取代，不得使用。
 
 ### P8-R01：测试机要求
 
@@ -964,7 +967,7 @@ LanDrop-Setup.exe
 - [x] TEMP 自清理器使用目标外 cwd、等待 onefile 父/子进程、有限重试和最终不存在确认；
 - [x] 用户数据删除/保留符合选择；
 - [x] Shared/Received 和自定义用户文件目录永不删除；
-- [x] 既有回归及 Phase 8 新增自动化合计 197 项全部通过；64 个 Python 文件的语法、Ruff 与 strict Pyright 审查零错误、零警告；
+- [x] 既有回归及 Phase 8 新增自动化合计 198 项全部通过；64 个 Python 文件的语法、Ruff 与 strict Pyright 审查零错误、零警告；
 - [x] 本机安装/升级/卸载完整生命周期通过。
 
 **Phase 8F 最终发布验收**还必须额外满足：
