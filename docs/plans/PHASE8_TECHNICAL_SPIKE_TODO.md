@@ -1,11 +1,12 @@
 # 第八阶段详细计划：安装器、卸载器与分发
 
-状态：**Phase 8A～8E 开发实现、自动化回归和本机真实安装生命周期开发验收通过；RC1～RC3 已被取代，RC4 已冻结；Phase 8F 干净 Windows 11 最终发布验收尚未完成（2026-09-27）**。
+状态：**Phase 8A～8E 开发实现、自动化回归和本机真实安装生命周期开发验收通过；RC1～RC4 已被取代，RC5 已冻结；Phase 8F 干净 Windows 11 最终发布验收尚未完成（2026-09-28）**。
 
-实施进度（2026-09-27）：安装契约、生命周期锁、权威状态、首次安装、事务升级/回滚、`pending_cleanup`、临时 Uninstall 迁出、绑定 request、精确系统对象移除及用户数据白名单清理均已落地。实机暴露的 onefile TEMP 自清理时序、`StartupApproved` 派生状态残留和临时卸载页本地资源定位问题均已完成针对性修复。当前完整自动化回归为 181 项且全部通过；64 个 Python 文件已分批完成语法、Ruff 与 strict Pyright 零错误/零警告审查。Python 3.12 x64 + PyInstaller 6.22.3 生成的主程序 `--onedir`、Uninstall `--onefile --windowed` 和 Setup `--onefile --windowed` 均通过自检。本机已完整走通 A 首装与双向传输、A→B 事务升级、B 双向传输、保留数据卸载、重新安装和删除应用数据卸载；最终无程序根、系统集成、进程、TCP 8000 或 `uninstall-*` TEMP 残留，Shared/Received 文件保持大小与 SHA-256 不变。RC1～RC3 均未进入最终发布验收即被后续界面、行为或质量收口取代；RC4 已从 `dee710e` 构建并冻结，Phase 8F 只测试 RC4。Phase 8 development acceptance 为 PASS；Phase 8F final release acceptance 仍为 NOT YET COMPLETE。
+实施进度（2026-09-28）：安装契约、生命周期锁、权威状态、首次安装、事务升级/回滚、`pending_cleanup`、临时 Uninstall 迁出、绑定 request、精确系统对象移除及用户数据白名单清理均已落地。实机暴露的 onefile TEMP 自清理时序、`StartupApproved` 派生状态残留和临时卸载页本地资源定位问题均已完成针对性修复。当前完整自动化回归为 185 项且全部通过；64 个 Python 文件已分批完成语法、Ruff 与 strict Pyright 零错误/零警告审查，最近改动的 5 个 Python 文件也已复审通过。启动时删除 WLAN Registry SSID 猜测 fallback，profile 查询失败返回 `Unknown` 并拒绝启动；可信凭据新写入服务端 `expires_at` 并强制 365 天期限，旧记录从 `created_at` 推导并过期惰性清理。Python 3.12 x64 + PyInstaller 6.22.3 生成的主程序 `--onedir`、Uninstall `--onefile --windowed` 和 Setup `--onefile --windowed` 均通过自检。本机已完整走通此前 A 首装、升级、传输和卸载生命周期；RC1～RC4 均未进入最终发布验收即被后续界面、行为、质量或安全收口取代；RC5 已从 `1871880` 构建并冻结，Phase 8F 只测试 RC5。HTTP 连接并发、慢请求和上传空间 reservation 仍属开放风险，不声称已在本轮解决。Phase 8 development acceptance 为 PASS；Phase 8F final release acceptance 仍为 NOT YET COMPLETE。
 
 > 0.6.0-rc1 was superseded before final release acceptance by post-RC1 UI/behavior changes.
 > 0.6.0-rc3 was superseded before final release acceptance by repository-wide static governance and its packaging compatibility fix.
+> 0.6.0-rc4 was superseded before final release acceptance by startup network fail-closed and server-enforced credential expiry fixes.
 
 前置条件：第七阶段开发验收已通过并冻结为第八阶段基线。当前已有 Python 3.12 x64 + PyInstaller 6.22.3 `--onedir` 主程序构建、统一资源定位、单实例、WebView2 Runtime 检查、滚动日志、托盘/Toast、Private/Public 网络边界及 94 项自动化回归证据。第七阶段正式无 Python/无源码干净 Windows 11 验收因测试机暂不可用而延期，必须在第八阶段最终发布验收中一并补齐。
 
@@ -855,7 +856,7 @@ Phase 8E 最终功能基线提交：`22d77ebe4e251aeeb6cd97a734ccb2978ac853e2`�
 
 ## 十、Phase 8F：干净 Windows 11 最终发布验收
 
-冻结候选：`0.6.0-rc4`，源码提交 `dee710e4b49e73cc366b2e8ccfe68219146b859b`，Build ID `0.6.0-dee710e-20260927131443`。P8-R01～R04 只允许使用 `C:\Projects\LanDrop-ReleaseCandidates\0.6.0-rc4-dee710e` 中的 RC4 产物和随目录冻结的 A 升级基线，不再使用 RC1、RC2 或 RC3。
+冻结候选：`0.6.0-rc5`，源码提交 `18718805a404ca0f30352c47a00486d4d0553e91`，Build ID `0.6.0-1871880-20260928012333`。P8-R01～R04 只允许使用 `C:\Projects\LanDrop-ReleaseCandidates\0.6.0-rc5-1871880` 中的 RC5 产物和随目录冻结的 A 升级基线，不再使用 RC1～RC4。
 
 ### P8-R01：测试机要求
 
@@ -956,7 +957,7 @@ LanDrop-Setup.exe
 - [x] TEMP 自清理器使用目标外 cwd、等待 onefile 父/子进程、有限重试和最终不存在确认；
 - [x] 用户数据删除/保留符合选择；
 - [x] Shared/Received 和自定义用户文件目录永不删除；
-- [x] 既有回归及 Phase 8 新增自动化合计 181 项全部通过；64 个 Python 文件的语法、Ruff 与 strict Pyright 审查零错误、零警告；
+- [x] 既有回归及 Phase 8 新增自动化合计 185 项全部通过；64 个 Python 文件的语法、Ruff 与 strict Pyright 审查零错误、零警告；
 - [x] 本机安装/升级/卸载完整生命周期通过。
 
 **Phase 8F 最终发布验收**还必须额外满足：
