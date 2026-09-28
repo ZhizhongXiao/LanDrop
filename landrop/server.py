@@ -9,12 +9,14 @@ import sys
 import threading
 from socketserver import TCPServer, ThreadingMixIn
 from typing import Any
-from wsgiref.simple_server import WSGIRequestHandler, WSGIServer, make_server
+from wsgiref.simple_server import WSGIRequestHandler, WSGIServer
 
 logger = logging.getLogger("landrop.server")
 
 
 SHUTDOWN_POLL_INTERVAL_SECONDS = 0.1
+MAX_HTTP_WORKERS = 16
+SOCKET_IDLE_TIMEOUT_SECONDS = 30.0
 type ServerRequest = socket.socket | tuple[bytes, socket.socket]
 
 
@@ -34,10 +36,22 @@ class ThreadedWSGIServer(ThreadingMixIn, WSGIServer):
     daemon_threads = True
     allow_reuse_address = True
 
-    def __init__(self, *args: Any, **kwargs: Any) -> None:
+    def __init__(
+        self,
+        *args: Any,
+        request_slots: threading.BoundedSemaphore | None = None,
+        socket_idle_timeout_seconds: float = SOCKET_IDLE_TIMEOUT_SECONDS,
+        **kwargs: Any,
+    ) -> None:
         super().__init__(*args, **kwargs)
         self._connections: set[ServerRequest] = set()
         self._connections_lock = threading.Lock()
+        self._request_slots = (
+            request_slots
+            if request_slots is not None
+            else threading.BoundedSemaphore(MAX_HTTP_WORKERS)
+        )
+        self._socket_idle_timeout_seconds = socket_idle_timeout_seconds
 
     def server_bind(self) -> None:
         """Bind without HTTPServer's blocking reverse-DNS lookup.
@@ -53,16 +67,31 @@ class ThreadedWSGIServer(ThreadingMixIn, WSGIServer):
         self.setup_environ()
 
     def process_request(self, request: ServerRequest, client_address: tuple[str, int]) -> None:
+        if not self._request_slots.acquire(blocking=False):
+            logger.info("[连接限额] %s 超出 HTTP 并发上限。", client_address[0])
+            self.shutdown_request(request)
+            return
         with self._connections_lock:
             self._connections.add(request)
-        super().process_request(request, client_address)
+        try:
+            connection = request if isinstance(request, socket.socket) else request[1]
+            connection.settimeout(self._socket_idle_timeout_seconds)
+            super().process_request(request, client_address)
+        except BaseException:
+            self.shutdown_request(request)
+            raise
 
     def shutdown_request(self, request: ServerRequest) -> None:
         try:
             super().shutdown_request(request)
         finally:
+            release_slot = False
             with self._connections_lock:
-                self._connections.discard(request)
+                if request in self._connections:
+                    self._connections.remove(request)
+                    release_slot = True
+            if release_slot:
+                self._request_slots.release()
 
     def close_active_connections(self) -> None:
         with self._connections_lock:
@@ -91,32 +120,40 @@ class ThreadedWSGIServer(ThreadingMixIn, WSGIServer):
 class ServerGroup:
     """Run the same WSGI app on the selected LAN address and loopback."""
 
-    def __init__(self, lan_address: str, port: int, application: Any) -> None:
-        self._servers: list[WSGIServer] = []
+    def __init__(
+        self,
+        lan_address: str,
+        port: int,
+        application: Any,
+        *,
+        request_slots: threading.BoundedSemaphore | None = None,
+    ) -> None:
+        self._servers: list[ThreadedWSGIServer] = []
         self._threads: list[threading.Thread] = []
         self._lifecycle_lock = threading.Lock()
         self._stopping = threading.Event()
         self._closed = False
+        shared_request_slots = (
+            request_slots
+            if request_slots is not None
+            else threading.BoundedSemaphore(MAX_HTTP_WORKERS)
+        )
         try:
-            self._servers.append(
-                make_server(
-                    lan_address,
-                    port,
-                    application,
-                    server_class=ThreadedWSGIServer,
-                    handler_class=LanDropRequestHandler,
-                )
+            lan_server = ThreadedWSGIServer(
+                (lan_address, port),
+                LanDropRequestHandler,
+                request_slots=shared_request_slots,
             )
+            lan_server.set_app(application)
+            self._servers.append(lan_server)
             if lan_address != "127.0.0.1":
-                self._servers.append(
-                    make_server(
-                        "127.0.0.1",
-                        port,
-                        application,
-                        server_class=ThreadedWSGIServer,
-                        handler_class=LanDropRequestHandler,
-                    )
+                loopback_server = ThreadedWSGIServer(
+                    ("127.0.0.1", port),
+                    LanDropRequestHandler,
+                    request_slots=shared_request_slots,
                 )
+                loopback_server.set_app(application)
+                self._servers.append(loopback_server)
         except OSError:
             self.close()
             raise
@@ -148,8 +185,7 @@ class ServerGroup:
             for server in self._servers:
                 if self._threads:
                     server.shutdown()
-                if isinstance(server, ThreadedWSGIServer):
-                    server.close_active_connections()
+                server.close_active_connections()
                 server.server_close()
             for thread in self._threads:
                 thread.join(timeout=3)
