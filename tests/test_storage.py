@@ -35,6 +35,17 @@ class FilenameTests(unittest.TestCase):
     def test_prefixes_reserved_device_name(self) -> None:
         self.assertEqual(sanitize_filename("CON.txt"), "_CON.txt")
 
+    def test_prefixes_reserved_device_root_before_multiple_extensions(self) -> None:
+        for filename in (
+            "NUL.tar.gz",
+            "CON.foo.bar",
+            "COM1.backup.zip",
+            "COM¹.txt",
+            "LPT².data",
+        ):
+            with self.subTest(filename=filename):
+                self.assertEqual(sanitize_filename(filename), f"_{filename}")
+
     def test_rejects_empty_filename(self) -> None:
         with self.assertRaises(InvalidFilenameError):
             sanitize_filename(" ... ")

@@ -30,6 +30,8 @@ _WINDOWS_RESERVED = {
     "NUL",
     *(f"COM{number}" for number in range(1, 10)),
     *(f"LPT{number}" for number in range(1, 10)),
+    *(f"COM{number}" for number in "¹²³"),
+    *(f"LPT{number}" for number in "¹²³"),
 }
 _INVALID_FILENAME = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 _WHITESPACE = re.compile(r"\s+")
@@ -92,10 +94,12 @@ def sanitize_filename(raw_filename: str) -> str:
     if not basename or basename in {".", ".."}:
         raise InvalidFilenameError("文件名清理后为空。")
 
+    reserved_root = basename.partition(".")[0].upper()
+    if reserved_root in _WINDOWS_RESERVED:
+        basename = f"_{basename}"
+
     suffix = Path(basename).suffix[:20]
     stem = basename[: -len(suffix)] if suffix else basename
-    if stem.upper() in _WINDOWS_RESERVED:
-        stem = f"_{stem}"
     allowed_stem = MAX_FILENAME_LENGTH - len(suffix)
     basename = f"{stem[:allowed_stem]}{suffix}".rstrip(" .")
     if not basename:
