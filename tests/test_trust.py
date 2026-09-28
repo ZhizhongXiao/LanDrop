@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import json
 import unittest
+from datetime import datetime
 from pathlib import Path
 
 from support import temporary_directory
 
-from landrop.trust import CredentialStore, describe_user_agent
+from landrop.trust import CREDENTIAL_TTL, CredentialStore, describe_user_agent
 
 
 class CredentialStoreTests(unittest.TestCase):
@@ -43,6 +44,43 @@ class CredentialStoreTests(unittest.TestCase):
             store = CredentialStore(Path(temporary))
             _client, credential = store.issue("Test Browser")
             self.assertIsNone(store.verify(credential + "changed"))
+
+    def test_server_expiry_rejects_and_lazily_removes_expired_credentials(self) -> None:
+        with temporary_directory() as temporary:
+            store = CredentialStore(Path(temporary))
+            client, credential = store.issue("Test Browser")
+            payload = json.loads(store.path.read_text(encoding="utf-8"))
+            record = payload["clients"][0]
+            record["expires_at"] = "2020-01-01T00:00:00+00:00"
+            store.path.write_text(json.dumps(payload), encoding="utf-8")
+
+            self.assertIsNone(store.verify(credential))
+            self.assertEqual(store.list_clients(), [])
+            self.assertEqual(json.loads(store.path.read_text(encoding="utf-8"))["clients"], [])
+            self.assertEqual(client.client_id, record["client_id"])
+
+    def test_legacy_record_expiry_is_derived_from_creation_time(self) -> None:
+        with temporary_directory() as temporary:
+            store = CredentialStore(Path(temporary))
+            _client, credential = store.issue("Test Browser")
+            payload = json.loads(store.path.read_text(encoding="utf-8"))
+            record = payload["clients"][0]
+            record.pop("expires_at")
+            record["created_at"] = "2020-01-01T00:00:00+00:00"
+            store.path.write_text(json.dumps(payload), encoding="utf-8")
+
+            self.assertIsNone(store.verify(credential))
+            self.assertEqual(store.list_clients(), [])
+
+    def test_new_credentials_have_server_expiry(self) -> None:
+        with temporary_directory() as temporary:
+            store = CredentialStore(Path(temporary))
+            _client, _credential = store.issue("Test Browser")
+            record = json.loads(store.path.read_text(encoding="utf-8"))["clients"][0]
+            created = datetime.fromisoformat(record["created_at"])
+            expires = datetime.fromisoformat(record["expires_at"])
+
+            self.assertEqual(expires - created, CREDENTIAL_TTL)
 
     def test_structures_device_browser_and_custom_name(self) -> None:
         user_agent = (

@@ -34,7 +34,7 @@ from .storage import (
     resolve_shared_file,
     save_upload,
 )
-from .trust import CredentialStore, TrustedClient
+from .trust import CREDENTIAL_MAX_AGE_SECONDS, CredentialStore, TrustedClient
 
 COOKIE_NAME = "landrop_trust"
 PAIRING_ATTEMPT_LIMIT = 5
@@ -143,7 +143,7 @@ def create_application(config: WebConfig) -> tuple[_TrackedApplication, str]:
             COOKIE_NAME,
             credential,
             path="/",
-            max_age=365 * 24 * 60 * 60,
+            max_age=CREDENTIAL_MAX_AGE_SECONDS,
             httponly=True,
             samesite="Strict",
         )

@@ -9,7 +9,6 @@ import os
 import socket
 import struct
 import subprocess
-import winreg
 from collections.abc import Callable
 from ctypes import wintypes
 from dataclasses import dataclass
@@ -160,14 +159,11 @@ def discover_interfaces() -> list[LanInterface]:
         raise NetworkDiscoveryError(f"找不到 Windows PowerShell：{POWERSHELL}")
 
     profiles = _read_connection_profiles()
-    wifi_profile = _read_wifi_registry_profile() if not profiles else None
     names = dict(socket.if_nameindex())
     interfaces: list[LanInterface] = []
     for address, interface_index in _read_ipv4_table():
         profile = profiles.get(interface_index, {})
         native_name = names.get(interface_index) or f"接口 {interface_index}"
-        if not profile and wifi_profile and native_name.casefold().startswith("wireless"):
-            profile = wifi_profile
         interfaces.append(
             LanInterface(
                 alias=str(profile.get("alias") or native_name),
@@ -309,56 +305,6 @@ $item = Get-NetConnectionProfile -InterfaceIndex {index} -ErrorAction Stop
     except (KeyError, TypeError, ValueError):
         return None, ""
     return record, ""
-
-
-def _read_wifi_registry_profile() -> dict[str, object] | None:
-    """Fallback for restricted shells: match the active SSID to NetworkList."""
-    netsh = os.path.join(os.environ.get("SYSTEMROOT", r"C:\Windows"), "System32", "netsh.exe")
-    creation_flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-    try:
-        completed = subprocess.run(
-            [netsh, "wlan", "show", "interfaces"],
-            check=False,
-            capture_output=True,
-            timeout=10,
-            creationflags=creation_flags,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return None
-    if completed.returncode != 0:
-        return None
-
-    output = completed.stdout.decode("oem", errors="replace")
-    ssid = ""
-    for line in output.splitlines():
-        key, separator, value = line.partition(":")
-        if separator and key.strip().casefold() == "ssid":
-            ssid = value.strip()
-            break
-    if not ssid:
-        return None
-
-    profiles_path = r"SOFTWARE\Microsoft\Windows NT\CurrentVersion\NetworkList\Profiles"
-    category_names = {0: "Public", 1: "Private", 2: "DomainAuthenticated"}
-    try:
-        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, profiles_path) as profiles_key:
-            count = winreg.QueryInfoKey(profiles_key)[0]
-            for index in range(count):
-                child_name = winreg.EnumKey(profiles_key, index)
-                with winreg.OpenKey(profiles_key, child_name) as child_key:
-                    profile_name = str(winreg.QueryValueEx(child_key, "ProfileName")[0])
-                    if profile_name != ssid:
-                        continue
-                    category = int(winreg.QueryValueEx(child_key, "Category")[0])
-                    return {
-                        "alias": "WLAN",
-                        "category": category_names.get(category, "Unknown"),
-                        "connectivity": "Connected",
-                        "name": profile_name,
-                    }
-    except (OSError, ValueError):
-        return None
-    return None
 
 
 def _read_connection_profiles() -> dict[int, dict[str, object]]:

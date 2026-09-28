@@ -12,11 +12,13 @@ from collections.abc import Generator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
 from dataclasses import field as dataclass_field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import cast
 
 MAX_TRUSTED_CLIENTS = 20
+CREDENTIAL_TTL = timedelta(days=365)
+CREDENTIAL_MAX_AGE_SECONDS = int(CREDENTIAL_TTL.total_seconds())
 
 
 @dataclass(frozen=True, slots=True)
@@ -79,7 +81,8 @@ class CredentialStore:
         """Build a credential without changing the persistent trust file."""
         client_id = secrets.token_urlsafe(9)
         token = secrets.token_urlsafe(32)
-        created_at = datetime.now(UTC).isoformat()
+        created = datetime.now(UTC)
+        created_at = created.isoformat()
         clean_name = " ".join(device_name.split())[:40]
         details = describe_user_agent(user_agent, client_hints)
         label = clean_name or details["device_label"]
@@ -93,6 +96,7 @@ class CredentialStore:
             "device_model": details["device_model"],
             "browser_engine": details["browser_engine"],
             "created_at": created_at,
+            "expires_at": (created + CREDENTIAL_TTL).isoformat(),
             "token_hash": _token_hash(token),
         }
         return PreparedCredential(
@@ -131,7 +135,7 @@ class CredentialStore:
             return None
         expected = _token_hash(token)
         with self._lock:
-            for record in self._load():
+            for record in self._active_records():
                 if record.get("client_id") != client_id:
                     continue
                 stored = str(record.get("token_hash") or "")
@@ -143,9 +147,22 @@ class CredentialStore:
         with self._lock:
             return [
                 _client_from_record(item)
-                for item in self._load()
+                for item in self._active_records()
                 if item.get("client_id")
             ]
+
+    def _active_records(self) -> list[dict[str, object]]:
+        records = self._load()
+        now = datetime.now(UTC)
+        active = [
+            record
+            for record in records
+            if (expires_at := _credential_expiry(record)) is not None
+            and now < expires_at
+        ]
+        if len(active) != len(records):
+            self._save(active)
+        return active
 
     def revoke(self, client_id: str) -> bool:
         with self._lock:
@@ -205,6 +222,28 @@ class CredentialStore:
 
 def _token_hash(token: str) -> str:
     return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def _credential_expiry(record: Mapping[str, object]) -> datetime | None:
+    """Resolve server expiry, deriving it for legacy trust records."""
+    try:
+        created_at = _parse_utc_timestamp(record.get("created_at"))
+        maximum_expiry = created_at + CREDENTIAL_TTL
+        stored_expiry = record.get("expires_at")
+        if stored_expiry is None:
+            return maximum_expiry
+        return min(_parse_utc_timestamp(stored_expiry), maximum_expiry)
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
+def _parse_utc_timestamp(value: object) -> datetime:
+    if not isinstance(value, str) or not value:
+        raise ValueError("credential timestamp is missing")
+    parsed = datetime.fromisoformat(value)
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ValueError("credential timestamp must include a timezone")
+    return parsed.astimezone(UTC)
 
 
 def _client_from_record(record: Mapping[str, object]) -> TrustedClient:

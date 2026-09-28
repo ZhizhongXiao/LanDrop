@@ -10,6 +10,7 @@ from landrop.network import (
     EndpointChecker,
     LanInterface,
     NetworkDiscoveryError,
+    discover_interfaces,
     read_network_category,
     select_interface,
 )
@@ -93,7 +94,6 @@ class EndpointCheckerTests(unittest.TestCase):
         with (
             patch("landrop.network.subprocess.run", return_value=completed) as run,
             patch("landrop.network._read_connection_profiles_result") as full_reader,
-            patch("landrop.network._read_wifi_registry_profile") as wifi_fallback,
         ):
             category = read_network_category(12, alias="WLAN")
 
@@ -103,7 +103,6 @@ class EndpointCheckerTests(unittest.TestCase):
         self.assertEqual(run.call_args.kwargs["timeout"], 4.0)
         self.assertEqual(RUNTIME_CATEGORY_TIMEOUT_SECONDS, 4.0)
         full_reader.assert_not_called()
-        wifi_fallback.assert_not_called()
 
     def test_runtime_category_timeout_does_not_use_registry_fallback(self) -> None:
         with (
@@ -111,12 +110,29 @@ class EndpointCheckerTests(unittest.TestCase):
                 "landrop.network.subprocess.run",
                 side_effect=subprocess.TimeoutExpired("powershell", 4.0),
             ),
-            patch("landrop.network._read_wifi_registry_profile") as wifi_fallback,
             self.assertRaisesRegex(NetworkDiscoveryError, "查询超时"),
         ):
             read_network_category(12, alias="WLAN")
 
-        wifi_fallback.assert_not_called()
+
+    def test_startup_profile_failure_does_not_guess_wifi_category(self) -> None:
+        with (
+            patch("landrop.network.os.name", "nt"),
+            patch("landrop.network.os.path.isfile", return_value=True),
+            patch("landrop.network._read_connection_profiles", return_value={}),
+            patch(
+                "landrop.network._read_ipv4_table",
+                return_value=[("192.168.50.10", 12)],
+            ),
+            patch("landrop.network.socket.if_nameindex", return_value=[(12, "Wi-Fi")]),
+        ):
+            interfaces = discover_interfaces()
+
+        self.assertEqual(len(interfaces), 1)
+        self.assertEqual(interfaces[0].category, "Unknown")
+        self.assertEqual(interfaces[0].interface_index, 12)
+        with self.assertRaisesRegex(NetworkDiscoveryError, "无法确认.*Private"):
+            select_interface(interfaces)
 
     def test_explicit_public_interface_is_rejected_before_start(self) -> None:
         public = LanInterface(
