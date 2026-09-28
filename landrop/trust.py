@@ -16,8 +16,8 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import cast
 
-MAX_TRUSTED_CLIENTS = 20
-CREDENTIAL_TTL = timedelta(days=365)
+MAX_TRUSTED_CLIENTS = 3
+CREDENTIAL_TTL = timedelta(days=5)
 CREDENTIAL_MAX_AGE_SECONDS = int(CREDENTIAL_TTL.total_seconds())
 
 

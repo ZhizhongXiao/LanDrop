@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import unittest
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from support import temporary_directory
@@ -11,6 +11,16 @@ from landrop.trust import CREDENTIAL_TTL, CredentialStore, describe_user_agent
 
 
 class CredentialStoreTests(unittest.TestCase):
+    def test_trusted_client_capacity_is_three_and_newest_credentials_are_kept(self) -> None:
+        with temporary_directory() as temporary:
+            store = CredentialStore(Path(temporary))
+            credentials = [store.issue(f"Browser {index}")[1] for index in range(4)]
+
+            self.assertEqual(len(store.list_clients()), 3)
+            self.assertIsNone(store.verify(credentials[0]))
+            for credential in credentials[1:]:
+                self.assertIsNotNone(store.verify(credential))
+
     def test_prepared_credential_is_rolled_back_until_explicit_commit(self) -> None:
         with temporary_directory() as temporary:
             store = CredentialStore(Path(temporary))
@@ -81,6 +91,7 @@ class CredentialStoreTests(unittest.TestCase):
             expires = datetime.fromisoformat(record["expires_at"])
 
             self.assertEqual(expires - created, CREDENTIAL_TTL)
+            self.assertEqual(CREDENTIAL_TTL, timedelta(days=5))
 
     def test_structures_device_browser_and_custom_name(self) -> None:
         user_agent = (
@@ -121,7 +132,7 @@ class CredentialStoreTests(unittest.TestCase):
                             {
                                 "client_id": "legacy-client",
                                 "label": "23116PN5BC",
-                                "created_at": "2026-09-16T00:00:00+00:00",
+                                "created_at": datetime.now(UTC).isoformat(),
                                 "device_type": "手机",
                                 "operating_system": "Android 16",
                                 "browser": "Google Chrome 152",
