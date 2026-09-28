@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import socket
 import threading
+import time
 import unittest
 from socketserver import ThreadingMixIn
 from unittest.mock import patch
@@ -67,6 +68,15 @@ class HttpWorkerLimitTests(unittest.TestCase):
         client = socket.create_connection((str(address), int(port)), timeout=2)
         try:
             client.sendall(b"GET / HTTP/1.1\r\nHost:")
+            deadline = time.monotonic() + 2
+            while request_slots.acquire(blocking=False):
+                request_slots.release()
+                if time.monotonic() >= deadline:
+                    self.fail("stalled connection never occupied a worker slot")
+                time.sleep(0.01)
+
+            client.settimeout(2)
+            self.assertEqual(client.recv(1), b"")
             self.assertTrue(request_slots.acquire(timeout=2))
             request_slots.release()
         finally:

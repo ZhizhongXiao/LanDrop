@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import errno
 import os
 import time
 import unittest
 from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Self
 from unittest.mock import patch
 
 from support import temporary_directory
@@ -39,6 +41,24 @@ class FilenameTests(unittest.TestCase):
 
 
 class UploadTests(unittest.TestCase):
+    def test_enospc_is_reported_as_insufficient_space(self) -> None:
+        class DiskFullOutput:
+            def __enter__(self) -> Self:
+                return self
+
+            def __exit__(self, *_exc_info: object) -> None:
+                return None
+
+            def write(self, _data: bytes) -> None:
+                raise OSError(errno.ENOSPC, "simulated full disk")
+
+        with (
+            temporary_directory() as temporary,
+            patch.object(Path, "open", return_value=DiskFullOutput()),
+            self.assertRaises(InsufficientSpaceError),
+        ):
+            save_upload(BytesIO(b"x"), "full.bin", Path(temporary), 10)
+
     def test_space_budget_reserves_concurrent_uploads_and_releases_on_exit(self) -> None:
         budget = UploadSpaceBudget()
         directory = Path(".")

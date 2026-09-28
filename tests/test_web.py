@@ -7,7 +7,7 @@ import unittest
 from collections.abc import Callable, Iterable
 from io import BytesIO
 from pathlib import Path
-from types import TracebackType
+from types import SimpleNamespace, TracebackType
 from unittest.mock import patch
 from urllib.parse import quote, urlencode
 from wsgiref.util import setup_testing_defaults
@@ -15,7 +15,13 @@ from wsgiref.util import setup_testing_defaults
 from support import temporary_directory
 
 from landrop.lifecycle import SessionLifecycle
-from landrop.storage import UploadResult
+from landrop.storage import (
+    MINIMUM_FREE_SPACE,
+    InsufficientSpaceError,
+    StorageError,
+    UploadResult,
+    UploadSpaceBudget,
+)
 from landrop.trust import CredentialStore
 from landrop.web import StartResponse, TrackedIterable, WebConfig, create_application
 
@@ -31,9 +37,15 @@ class BottleApplicationTests(unittest.TestCase):
         (self.shared / "hello.txt").write_text("hello", encoding="utf-8")
         self.store = CredentialStore(root / "data")
         self.lifecycle = SessionLifecycle()
-        self.app, self.code = create_application(
-            WebConfig(self.shared, self.received, 1024, self.store, self.lifecycle)
-        )
+        self.upload_slots = threading.BoundedSemaphore(2)
+        self.upload_space = UploadSpaceBudget()
+        with (
+            patch("landrop.web.threading.BoundedSemaphore", return_value=self.upload_slots),
+            patch("landrop.web.UploadSpaceBudget", return_value=self.upload_space),
+        ):
+            self.app, self.code = create_application(
+                WebConfig(self.shared, self.received, 1024, self.store, self.lifecycle)
+            )
 
     def tearDown(self) -> None:
         self.temporary.cleanup()
@@ -229,12 +241,141 @@ class BottleApplicationTests(unittest.TestCase):
         )
 
         self.assertTrue(status.startswith("400"), body.decode())
+
+        retry_status, _retry_headers, retry_body = wsgi_request(
+            self.app,
+            "/upload/raw",
+            method="POST",
+            body=b"retry",
+            content_type="application/octet-stream",
+            cookie=cookie,
+            extra_headers={
+                "HTTP_X_LANDROP_CSRF": csrf,
+                "HTTP_X_LANDROP_FILENAME": "retry.bin",
+            },
+        )
+        self.assertTrue(retry_status.startswith("201"), retry_body.decode())
         snapshot = self.lifecycle.snapshot()
         self.assertEqual(snapshot.active_transfers, 0)
         self.assertEqual(snapshot.statistics["failed_uploads"], 1)
         self.assertEqual(snapshot.statistics["failed_upload_mb"], 0.000005)
         self.assertEqual(snapshot.statistics["failures"], {"client_disconnect": 1})
-        self.assertEqual(list(self.received.iterdir()), [])
+        self.assertEqual([path.name for path in self.received.iterdir()], ["retry.bin"])
+        self.assert_upload_resources_available()
+
+    def test_disk_space_rejection_releases_upload_slot(self) -> None:
+        cookie, csrf = self._trusted_session()
+        with (
+            patch(
+                "landrop.storage.shutil.disk_usage",
+                side_effect=[
+                    SimpleNamespace(free=MINIMUM_FREE_SPACE),
+                    SimpleNamespace(free=MINIMUM_FREE_SPACE + 1),
+                ],
+            ),
+            patch(
+                "landrop.web.save_upload",
+                return_value=UploadResult("accepted.bin", 1, False),
+            ) as save_upload,
+        ):
+            denied_status, _headers, _body = wsgi_request(
+                self.app,
+                "/upload/raw",
+                method="POST",
+                body=b"x",
+                content_type="application/octet-stream",
+                cookie=cookie,
+                extra_headers={
+                    "HTTP_X_LANDROP_CSRF": csrf,
+                    "HTTP_X_LANDROP_FILENAME": "denied.bin",
+                },
+            )
+            accepted_status, _headers, accepted_body = wsgi_request(
+                self.app,
+                "/upload/raw",
+                method="POST",
+                body=b"y",
+                content_type="application/octet-stream",
+                cookie=cookie,
+                extra_headers={
+                    "HTTP_X_LANDROP_CSRF": csrf,
+                    "HTTP_X_LANDROP_FILENAME": "accepted.bin",
+                },
+            )
+
+        self.assertTrue(denied_status.startswith("400"), denied_status)
+        self.assertTrue(accepted_status.startswith("201"), accepted_body.decode())
+        save_upload.assert_called_once()
+        self.assert_upload_resources_available()
+        self.assertEqual(
+            self.lifecycle.snapshot().statistics["rejections"],
+            {"insufficient_space": 1},
+        )
+
+    def test_enospc_and_storage_errors_release_upload_resources(self) -> None:
+        cookie, csrf = self._trusted_session()
+        outcomes = [
+            InsufficientSpaceError("simulated ENOSPC"),
+            StorageError("simulated storage failure"),
+            UploadResult("retry.bin", 1, False),
+        ]
+        statuses: list[str] = []
+        with patch("landrop.web.save_upload", side_effect=outcomes):
+            for filename in ("disk-full.bin", "storage-error.bin", "retry.bin"):
+                status, _headers, _body = wsgi_request(
+                    self.app,
+                    "/upload/raw",
+                    method="POST",
+                    body=b"x",
+                    content_type="application/octet-stream",
+                    cookie=cookie,
+                    extra_headers={
+                        "HTTP_X_LANDROP_CSRF": csrf,
+                        "HTTP_X_LANDROP_FILENAME": filename,
+                    },
+                )
+                statuses.append(status)
+
+        self.assertTrue(statuses[0].startswith("400"), statuses)
+        self.assertTrue(statuses[1].startswith("400"), statuses)
+        self.assertTrue(statuses[2].startswith("201"), statuses)
+        self.assert_upload_resources_available()
+
+    def test_session_stop_cancels_active_upload_and_releases_resources(self) -> None:
+        cookie, csrf = self._trusted_session()
+
+        def stop_while_saving(
+            _source: object,
+            _filename: str,
+            _directory: Path,
+            _max_bytes: int,
+            **callbacks: object,
+        ) -> UploadResult:
+            self.lifecycle.stop("manual_stop", "manual_stop")
+            check_cancelled = callbacks["check_cancelled"]
+            assert callable(check_cancelled)
+            check_cancelled()
+            raise AssertionError("cancel check should have aborted the save")
+
+        with patch("landrop.web.save_upload", side_effect=stop_while_saving):
+            status, _headers, body = wsgi_request(
+                self.app,
+                "/upload/raw",
+                method="POST",
+                body=b"x",
+                content_type="application/octet-stream",
+                cookie=cookie,
+                extra_headers={
+                    "HTTP_X_LANDROP_CSRF": csrf,
+                    "HTTP_X_LANDROP_FILENAME": "cancelled.bin",
+                },
+            )
+
+        self.assertTrue(status.startswith("503"), body.decode())
+        snapshot = self.lifecycle.snapshot()
+        self.assertEqual(snapshot.active_transfers, 0)
+        self.assertEqual(snapshot.statistics["failures"], {"manual_stop": 1})
+        self.assert_upload_resources_available()
 
     def test_upload_routes_share_two_slots_and_reject_before_multipart_parse(self) -> None:
         cookie, csrf = self._trusted_session()
@@ -323,6 +464,7 @@ class BottleApplicationTests(unittest.TestCase):
         snapshot = self.lifecycle.snapshot()
         self.assertEqual(snapshot.active_transfers, 0)
         self.assertEqual(snapshot.statistics["rejections"], {"upload_busy": 1})
+        self.assert_upload_resources_available()
 
     def test_upload_slot_is_released_after_uncaught_storage_error(self) -> None:
         cookie, csrf = self._trusted_session()
@@ -359,6 +501,21 @@ class BottleApplicationTests(unittest.TestCase):
         self.assertTrue(first_status.startswith("500"), first_status)
         self.assertTrue(second_status.startswith("201"), second_status)
         self.assertEqual(self.lifecycle.snapshot().active_transfers, 0)
+        self.assert_upload_resources_available()
+
+    def assert_upload_resources_available(self) -> None:
+        acquired = [self.upload_slots.acquire(blocking=False) for _ in range(2)]
+        self.assertEqual(acquired, [True, True])
+        self.assertFalse(self.upload_slots.acquire(blocking=False))
+        for was_acquired in acquired:
+            if was_acquired:
+                self.upload_slots.release()
+
+        with patch(
+            "landrop.storage.shutil.disk_usage",
+            return_value=SimpleNamespace(free=MINIMUM_FREE_SPACE + 1),
+        ), self.upload_space.reserve(self.received, 1):
+            pass
 
     def _trusted_session(self) -> tuple[str, str]:
         _client, credential = self.store.issue("Test Browser")
