@@ -1,6 +1,8 @@
 # 第八阶段详细计划：安装器、卸载器与分发
 
-状态：**Phase 8A～8E 开发实现、自动化回归和本机真实安装生命周期开发验收通过；RC1～RC5 已被取代，RC6 尚未构建；Phase 8F 干净 Windows 11 最终发布验收尚未完成（2026-09-28）**。
+状态：**Phase 8A～8E 开发实现、自动化回归和本机真实安装生命周期开发验收通过；RC1～RC5 已被取代；HTTP/上传资源边界补丁已实现并通过 193 项回归，RC6 待从干净提交构建；Phase 8F 干净 Windows 11 最终发布验收尚未完成（2026-09-28）**。
+
+资源边界更新（2026-09-28）：LAN 与 loopback 共用最多 16 个 HTTP worker slot，accepted socket 单次 I/O 空闲超时 30 秒；`/upload` 和 `/upload/raw` 共用最多 2 个并发上传 slot，第三个请求立即返回 HTTP 429 与 `Retry-After: 2`；进程内空间 reservation 从实际空闲空间中扣除已承诺上传字节，并只保留一次 10 MiB 安全余量，所有成功、失败和异常路径均释放。multipart 在取得 slot 与空间 reservation 前不读取 forms/files。实现保留 Bottle/wsgiref，不改变协议、Range、SessionLifecycle、5 分钟 session 或 60 秒 grace。它限制无界资源增长，但持续恶意连接仍可占满 16 个 slot 并暂时导致拒绝服务；不宣称为通用 DoS 防护。相关全量回归共 193 项通过；RC6 仍须从干净提交构建。
 
 实施进度（2026-09-28）：安装契约、生命周期锁、权威状态、首次安装、事务升级/回滚、`pending_cleanup`、临时 Uninstall 迁出、绑定 request、精确系统对象移除及用户数据白名单清理均已落地。实机暴露的 onefile TEMP 自清理时序、`StartupApproved` 派生状态残留和临时卸载页本地资源定位问题均已完成针对性修复。可信客户机容量为 3 台，凭据服务端有效期为 5 天；新记录写入 `expires_at`，旧记录按 `created_at` 收紧并过期惰性清理。RC5 仍包含 20 台 / 365 天策略，已被取代；RC6 尚未构建。启动时不再使用 WLAN Registry SSID 猜测 fallback，profile 查询失败返回 `Unknown` 并拒绝启动。Python 3.12 x64 + PyInstaller 6.22.3 生成的主程序 `--onedir`、Uninstall `--onefile --windowed` 和 Setup `--onefile --windowed` 曾通过 RC5 自检，但该产物不代表当前策略。本机已完整走通此前 A 首装、升级、传输和卸载生命周期；Phase 8F 干净 Windows 11 最终发布验收仍未完成。HTTP 连接并发、慢请求和上传空间 reservation 仍属开放风险。Phase 8 development acceptance 为 PASS；Phase 8F final release acceptance 仍为 NOT YET COMPLETE。
 
@@ -958,7 +960,7 @@ LanDrop-Setup.exe
 - [x] TEMP 自清理器使用目标外 cwd、等待 onefile 父/子进程、有限重试和最终不存在确认；
 - [x] 用户数据删除/保留符合选择；
 - [x] Shared/Received 和自定义用户文件目录永不删除；
-- [x] 既有回归及 Phase 8 新增自动化合计 186 项全部通过；64 个 Python 文件的语法、Ruff 与 strict Pyright 审查零错误、零警告；
+- [x] 既有回归及 Phase 8 新增自动化合计 193 项全部通过；64 个 Python 文件的语法、Ruff 与 strict Pyright 审查零错误、零警告；
 - [x] 本机安装/升级/卸载完整生命周期通过。
 
 **Phase 8F 最终发布验收**还必须额外满足：

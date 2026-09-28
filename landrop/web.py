@@ -7,7 +7,8 @@ import json
 import re
 import secrets
 import threading
-from collections.abc import Iterable, Iterator
+from collections.abc import Generator, Iterable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -27,8 +28,8 @@ from .storage import (
     InsufficientSpaceError,
     InvalidFilenameError,
     StorageError,
+    UploadSpaceBudget,
     UploadTooLargeError,
-    ensure_free_space,
     format_size,
     list_shared_files,
     resolve_shared_file,
@@ -40,6 +41,8 @@ COOKIE_NAME = "landrop_trust"
 PAIRING_ATTEMPT_LIMIT = 5
 MULTIPART_OVERHEAD_ALLOWANCE = 2 * 1024 * 1024
 SMALL_FORM_LIMIT = 4096
+MAX_CONCURRENT_UPLOADS = 2
+UPLOAD_RETRY_AFTER_SECONDS = 2
 
 type WsgiExceptionInfo = tuple[type[BaseException], BaseException, TracebackType]
 
@@ -57,6 +60,10 @@ class UploadInterruptedError(StorageError):
     """The client stopped sending before the declared request body ended."""
 
 
+class UploadBusyError(RuntimeError):
+    """The bounded upload slots are currently occupied."""
+
+
 @dataclass(frozen=True, slots=True)
 class WebConfig:
     shared_directory: Path
@@ -72,6 +79,19 @@ def create_application(config: WebConfig) -> tuple[_TrackedApplication, str]:
     csrf_token = secrets.token_urlsafe(24)
     failed_pairing: dict[str, int] = {}
     pairing_lock = threading.Lock()
+    upload_slots = threading.BoundedSemaphore(MAX_CONCURRENT_UPLOADS)
+    upload_space = UploadSpaceBudget()
+
+    @contextmanager
+    def admit_upload(expected_bytes: int) -> Generator[None, None, None]:
+        if not upload_slots.acquire(blocking=False):
+            lifecycle.record_rejection("upload_busy")
+            raise UploadBusyError
+        try:
+            with upload_space.reserve(config.receive_directory, expected_bytes):
+                yield
+        finally:
+            upload_slots.release()
 
     def expired_response() -> HTTPResponse | None:
         if lifecycle.accepts_new_requests():
@@ -766,51 +786,59 @@ def create_application(config: WebConfig) -> tuple[_TrackedApplication, str]:
                 413,
             )
         try:
-            ensure_free_space(config.receive_directory, content_length)
+            with admit_upload(content_length):
+                if not _valid_csrf(csrf_token):
+                    lifecycle.record_rejection("csrf")
+                    return _html_response(
+                        _error_page(403, "请求校验失败，请返回首页重试。"),
+                        403,
+                    )
+                try:
+                    transfer = lifecycle.begin_transfer("upload")
+                except SessionExpiredError:
+                    return expired_response() or _html_response(
+                        _error_page(503, "会话已到期。"),
+                        503,
+                    )
+                try:
+                    uploaded = request.files.get("file")
+                    if uploaded is None:
+                        transfer.fail("missing_file")
+                        return _html_response(_error_page(400, "没有选择上传文件。"), 400)
+                    result = save_upload(
+                        uploaded.file,
+                        uploaded.raw_filename,
+                        config.receive_directory,
+                        config.max_upload_bytes,
+                        progress=transfer.add_bytes,
+                        check_cancelled=transfer.check_cancelled,
+                    )
+                except UploadTooLargeError as exc:
+                    transfer.fail("size_limit")
+                    return _html_response(_error_page(413, str(exc)), 413)
+                except (InvalidFilenameError, InsufficientSpaceError, StorageError) as exc:
+                    transfer.fail("storage_error")
+                    return _html_response(_error_page(400, str(exc)), 400)
+                except TransferCancelledError as exc:
+                    transfer.fail(exc.reason)
+                    return _html_response(_error_page(503, "传输会话已经结束。"), 503)
+                except Exception:
+                    transfer.fail("server_error")
+                    raise
+                transfer.complete()
+
+                rename_note = "（因同名已自动重命名）" if result.renamed else ""
+                message = (
+                    f"<h1>上传成功</h1><p>已保存：<strong>{html.escape(result.filename)}</strong>"
+                    f" {html.escape(format_size(result.size))}{rename_note}</p>"
+                    '<p><a href="/">返回文件页面</a></p>'
+                )
+                return _html_response(_page("上传成功", message), 201)
+        except UploadBusyError:
+            return _upload_busy_response()
         except InsufficientSpaceError as exc:
             lifecycle.record_rejection("insufficient_space")
             return _html_response(_error_page(400, str(exc)), 400)
-        if not _valid_csrf(csrf_token):
-            lifecycle.record_rejection("csrf")
-            return _html_response(_error_page(403, "请求校验失败，请返回首页重试。"), 403)
-        try:
-            transfer = lifecycle.begin_transfer("upload")
-        except SessionExpiredError:
-            return expired_response() or _html_response(_error_page(503, "会话已到期。"), 503)
-        try:
-            uploaded = request.files.get("file")
-            if uploaded is None:
-                transfer.fail("missing_file")
-                return _html_response(_error_page(400, "没有选择上传文件。"), 400)
-            result = save_upload(
-                uploaded.file,
-                uploaded.raw_filename,
-                config.receive_directory,
-                config.max_upload_bytes,
-                progress=transfer.add_bytes,
-                check_cancelled=transfer.check_cancelled,
-            )
-        except UploadTooLargeError as exc:
-            transfer.fail("size_limit")
-            return _html_response(_error_page(413, str(exc)), 413)
-        except (InvalidFilenameError, InsufficientSpaceError, StorageError) as exc:
-            transfer.fail("storage_error")
-            return _html_response(_error_page(400, str(exc)), 400)
-        except TransferCancelledError as exc:
-            transfer.fail(exc.reason)
-            return _html_response(_error_page(503, "传输会话已经结束。"), 503)
-        except Exception:
-            transfer.fail("server_error")
-            raise
-        transfer.complete()
-
-        rename_note = "（因同名已自动重命名）" if result.renamed else ""
-        message = (
-            f"<h1>上传成功</h1><p>已保存：<strong>{html.escape(result.filename)}</strong>"
-            f" {html.escape(format_size(result.size))}{rename_note}</p>"
-            '<p><a href="/">返回文件页面</a></p>'
-        )
-        return _html_response(_page("上传成功", message), 201)
 
     @app.post("/upload/raw")
     def upload_raw() -> HTTPResponse:
@@ -847,50 +875,54 @@ def create_application(config: WebConfig) -> tuple[_TrackedApplication, str]:
                 413,
             )
         try:
-            ensure_free_space(config.receive_directory, content_length)
+            with admit_upload(content_length):
+                try:
+                    transfer = lifecycle.begin_transfer("upload")
+                except SessionExpiredError:
+                    return expired_response() or _html_response(
+                        _error_page(503, "会话已到期。"),
+                        503,
+                    )
+                try:
+                    wsgi_input = cast(BinaryIO, request.environ["wsgi.input"])
+                    source = _ContentLengthReader(wsgi_input, content_length)
+                    result = save_upload(
+                        source,
+                        raw_filename,
+                        config.receive_directory,
+                        config.max_upload_bytes,
+                        progress=transfer.add_bytes,
+                        check_cancelled=transfer.check_cancelled,
+                    )
+                except UploadTooLargeError as exc:
+                    transfer.fail("size_limit")
+                    return _html_response(_error_page(413, str(exc)), 413)
+                except UploadInterruptedError as exc:
+                    transfer.fail("client_disconnect")
+                    return _html_response(_error_page(400, str(exc)), 400)
+                except (InvalidFilenameError, InsufficientSpaceError, StorageError) as exc:
+                    transfer.fail("storage_error")
+                    return _html_response(_error_page(400, str(exc)), 400)
+                except TransferCancelledError as exc:
+                    transfer.fail(exc.reason)
+                    return _html_response(_error_page(503, "传输会话已经结束。"), 503)
+                except Exception:
+                    transfer.fail("server_error")
+                    raise
+                transfer.complete()
+
+                rename_note = "（因同名已自动重命名）" if result.renamed else ""
+                message = (
+                    f"<h1>上传成功</h1><p>已保存：<strong>{html.escape(result.filename)}</strong>"
+                    f" {html.escape(format_size(result.size))}{rename_note}</p>"
+                    '<p><a href="/">返回文件页面</a></p>'
+                )
+                return _html_response(_page("上传成功", message), 201)
+        except UploadBusyError:
+            return _upload_busy_response()
         except InsufficientSpaceError as exc:
             lifecycle.record_rejection("insufficient_space")
             return _html_response(_error_page(400, str(exc)), 400)
-
-        try:
-            transfer = lifecycle.begin_transfer("upload")
-        except SessionExpiredError:
-            return expired_response() or _html_response(_error_page(503, "会话已到期。"), 503)
-        try:
-            wsgi_input = cast(BinaryIO, request.environ["wsgi.input"])
-            source = _ContentLengthReader(wsgi_input, content_length)
-            result = save_upload(
-                source,
-                raw_filename,
-                config.receive_directory,
-                config.max_upload_bytes,
-                progress=transfer.add_bytes,
-                check_cancelled=transfer.check_cancelled,
-            )
-        except UploadTooLargeError as exc:
-            transfer.fail("size_limit")
-            return _html_response(_error_page(413, str(exc)), 413)
-        except UploadInterruptedError as exc:
-            transfer.fail("client_disconnect")
-            return _html_response(_error_page(400, str(exc)), 400)
-        except (InvalidFilenameError, InsufficientSpaceError, StorageError) as exc:
-            transfer.fail("storage_error")
-            return _html_response(_error_page(400, str(exc)), 400)
-        except TransferCancelledError as exc:
-            transfer.fail(exc.reason)
-            return _html_response(_error_page(503, "传输会话已经结束。"), 503)
-        except Exception:
-            transfer.fail("server_error")
-            raise
-        transfer.complete()
-
-        rename_note = "（因同名已自动重命名）" if result.renamed else ""
-        message = (
-            f"<h1>上传成功</h1><p>已保存：<strong>{html.escape(result.filename)}</strong>"
-            f" {html.escape(format_size(result.size))}{rename_note}</p>"
-            '<p><a href="/">返回文件页面</a></p>'
-        )
-        return _html_response(_page("上传成功", message), 201)
 
     @app.error(404)
     def not_found(_error: object) -> HTTPResponse:
@@ -1028,6 +1060,15 @@ def _error_page(code: int, message: str) -> str:
 
 def _html_response(body: str, status: int) -> HTTPResponse:
     return HTTPResponse(body=body, status=status, content_type="text/html; charset=UTF-8")
+
+
+def _upload_busy_response() -> HTTPResponse:
+    return HTTPResponse(
+        body=_error_page(429, "服务机正在接收其他文件，请稍后重试。"),
+        status=429,
+        content_type="text/html; charset=UTF-8",
+        headers={"Retry-After": str(UPLOAD_RETRY_AFTER_SECONDS)},
+    )
 
 
 class _TrackedApplication:

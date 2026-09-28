@@ -5,11 +5,16 @@ import time
 import unittest
 from io import BytesIO
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 from support import temporary_directory
 
 from landrop.storage import (
+    MINIMUM_FREE_SPACE,
+    InsufficientSpaceError,
     InvalidFilenameError,
+    UploadSpaceBudget,
     UploadTooLargeError,
     cleanup_orphaned_upload_parts,
     resolve_shared_file,
@@ -34,6 +39,47 @@ class FilenameTests(unittest.TestCase):
 
 
 class UploadTests(unittest.TestCase):
+    def test_space_budget_reserves_concurrent_uploads_and_releases_on_exit(self) -> None:
+        budget = UploadSpaceBudget()
+        directory = Path(".")
+        upload_bytes = 8 * 1024 * 1024
+        with (
+            patch(
+                "landrop.storage.shutil.disk_usage",
+                return_value=SimpleNamespace(free=upload_bytes + MINIMUM_FREE_SPACE),
+            ),
+            budget.reserve(directory, upload_bytes),
+            self.assertRaises(InsufficientSpaceError),
+            budget.reserve(directory, upload_bytes),
+        ):
+            self.fail("overcommitted upload reservation was accepted")
+
+        with patch(
+            "landrop.storage.shutil.disk_usage",
+            return_value=SimpleNamespace(free=upload_bytes + MINIMUM_FREE_SPACE),
+        ), budget.reserve(directory, upload_bytes):
+            pass
+
+    def test_space_budget_releases_reservation_after_exception(self) -> None:
+        budget = UploadSpaceBudget()
+        directory = Path(".")
+        upload_bytes = 8 * 1024 * 1024
+        with (
+            patch(
+                "landrop.storage.shutil.disk_usage",
+                return_value=SimpleNamespace(free=upload_bytes + MINIMUM_FREE_SPACE),
+            ),
+            self.assertRaisesRegex(RuntimeError, "simulated upload failure"),
+            budget.reserve(directory, upload_bytes),
+        ):
+            raise RuntimeError("simulated upload failure")
+
+        with patch(
+            "landrop.storage.shutil.disk_usage",
+            return_value=SimpleNamespace(free=upload_bytes + MINIMUM_FREE_SPACE),
+        ), budget.reserve(directory, upload_bytes):
+            pass
+
     def test_streams_and_renames_duplicate(self) -> None:
         with temporary_directory() as temporary:
             root = Path(temporary)

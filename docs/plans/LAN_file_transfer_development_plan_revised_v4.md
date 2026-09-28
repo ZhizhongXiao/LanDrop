@@ -4,7 +4,7 @@
 
 > 文档状态：修订稿 v4（第八阶段方案冻结版，持续记录阶段实施结果）
 > 适用对象：具备基础 Python 使用经验、暂不了解计算机通信原理的个人开发者
-> 当前进度：第六阶段已以 `0.6.0` 收官；第七阶段开发验收已通过并冻结为第八阶段基线。第八阶段 Phase 8A～8E 的安装状态、首次安装、事务升级/回滚、真实 Uninstall 和本机完整生命周期开发验收均已通过。实机暴露的 onefile TEMP 自清理、`StartupApproved` 派生状态残留和临时卸载页本地资源定位问题均已修复。RC1～RC5 均在最终发布验收前被后续界面、行为或安全修复取代；可信客户机策略现已收紧为最多 3 台、服务端期限 5 天，RC6 尚未构建。第二台无 Python、无源码、无旧安装历史的干净 Windows 11 门槛尚未完成，因此不得宣称正式发布验收结束。
+> 当前进度：第六阶段已以 `0.6.0` 收官；第七阶段开发验收已通过并冻结为第八阶段基线。第八阶段 Phase 8A～8E 的安装状态、首次安装、事务升级/回滚、真实 Uninstall 和本机完整生命周期开发验收均已通过。实机暴露的 onefile TEMP 自清理、`StartupApproved` 派生状态残留和临时卸载页本地资源定位问题均已修复。RC1～RC5 均在最终发布验收前被后续界面、行为或安全修复取代；可信客户机策略现已收紧为最多 3 台、服务端期限 5 天。HTTP 连接与上传资源边界补丁已通过 193 项完整回归，RC6 待从干净提交构建。第二台无 Python、无源码、无旧安装历史的干净 Windows 11 门槛尚未完成，因此不得宣称正式发布验收结束。
 
 > 0.6.0-rc1 was superseded before final release acceptance by post-RC1 UI/behavior changes.
 > 0.6.0-rc3 was superseded before final release acceptance by repository-wide static governance and its packaging compatibility fix.
@@ -980,11 +980,12 @@ Setup、临时 Uninstall、LanDrop 正常启动和 `pending_cleanup` 共用一�
 | 2026-09-28 | 启动网络类别 fail-closed 与可信凭据服务端有效期 | 移除 SSID/ProfileName WLAN 注册表猜测；无权威 profile 时保留 `Unknown` 并拒绝启动；新凭据写入 `expires_at`，服务端最多接受 365 天，旧记录按创建时间推导并惰性清理 |
 | 2026-09-28 | RC5 冻结并取代 RC4 | 从 `1871880` 构建，启动网络 fail-closed、365 天凭据期限和构建自检通过；随后由 3 台 / 5 天策略变更取代，RC6 待构建 |
 | 2026-09-28 | 可信客户机限制收紧 | 容量设为 3 台、凭据服务端有效期设为 5 天；旧记录也按创建时间最多允许 5 天 |
+| 2026-09-28 | HTTP/上传资源边界收口 | LAN 与 loopback 共用 16 个 HTTP worker 上限及 30 秒 socket I/O 空闲超时；两个上传路由共用 2 个 slot，第三个返回 429/Retry-After；进程内磁盘空间 reservation 防止并发超额承诺。持续占满 worker 的恶意客户端仍可暂时影响可用性，不宣称为通用 DoS 防护；193 项回归通过 |
 
 ## 10. 下一步
 
-第八阶段 Phase 8A～8E 开发实现和本机生命周期开发验收已经完成。真实当前用户安装根已完整走通 `Setup A → 运行与双向传输 A → Setup B → 运行与双向传输 B → 保留数据卸载 → 重新安装 → 删除应用数据卸载`；升级保留 Windows 禁用的自启动状态，卸载清理 Run、精确 StartupApproved、Uninstall 登记、快捷方式、程序根和 onefile TEMP，且始终保留 Shared/Received 用户文件。实机发现的问题均已形成最小修复并完成 186 项回归与再次实测；全仓静态审查也已收敛为零错误/零警告。除非 Phase 8F 暴露真实缺陷，不再主动扩展安装/卸载架构。
+第八阶段 Phase 8A～8E 开发实现和本机生命周期开发验收已经完成。真实当前用户安装根已完整走通 `Setup A → 运行与双向传输 A → Setup B → 运行与双向传输 B → 保留数据卸载 → 重新安装 → 删除应用数据卸载`；升级保留 Windows 禁用的自启动状态，卸载清理 Run、精确 StartupApproved、Uninstall 登记、快捷方式、程序根和 onefile TEMP，且始终保留 Shared/Received 用户文件。实机发现的问题均已形成最小修复并完成复测。HTTP worker、socket idle、上传并发与磁盘空间 reservation 硬边界已经实现，完整回归为 193 项通过；全仓静态审查也已收敛为零错误/零警告。除非 Phase 8F 暴露真实缺陷，不再主动扩展安装/卸载架构。
 
 下一步只进入 Phase 8F 发布验收：在无源码、无 venv、无独立 Python、无旧 LanDrop 安装历史的干净 Windows 11 上，从单个 `LanDrop-Setup.exe` 开始验证 WebView2 前置检查、离线安装边界、Private 实际传输、idle 与上传后多轮网络类别监控、Windows 原生防火墙行为、自启动但服务默认关闭、Public 拒绝、A→B 升级、Windows 卸载入口和系统状态恢复。第七阶段延期的干净环境验收与第八阶段发布验收合并执行；完成前不得宣称正式发布验收结束。
 
-Phase 8F 暂无有效冻结候选。RC5 的 365 天凭据策略与当前 3 台 / 5 天策略不一致，不得用于 P8-R01～R04；需从本策略变更后的干净提交重新构建并冻结 RC6。
+Phase 8F 暂无有效冻结候选。RC5 的 20 台 / 365 天凭据策略及其缺少 HTTP/上传资源边界补丁的状态均已过时，不得用于 P8-R01～R04；需从当前代码与策略变更后的干净提交重新构建并冻结 RC6。

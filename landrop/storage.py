@@ -12,7 +12,8 @@ import stat
 import threading
 import time
 import unicodedata
-from collections.abc import Callable
+from collections.abc import Callable, Generator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
@@ -102,15 +103,32 @@ def sanitize_filename(raw_filename: str) -> str:
     return basename
 
 
-def ensure_free_space(directory: Path, expected_bytes: int) -> None:
-    """Require room for the request plus a small safety reserve."""
-    free = shutil.disk_usage(directory).free
-    required = max(0, expected_bytes) + MINIMUM_FREE_SPACE
-    if free < required:
-        raise InsufficientSpaceError(
-            f"磁盘空间不足：至少需要 {format_size(required)}，"
-            f"当前可用 {format_size(free)}。"
-        )
+class UploadSpaceBudget:
+    """Reserve declared upload bytes against concurrent disk-space checks."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._reserved_bytes = 0
+
+    @contextmanager
+    def reserve(self, directory: Path, expected_bytes: int) -> Generator[None, None, None]:
+        amount = max(0, expected_bytes)
+        with self._lock:
+            free_bytes = shutil.disk_usage(directory).free
+            available_bytes = free_bytes - self._reserved_bytes
+            required_bytes = amount + MINIMUM_FREE_SPACE
+            if available_bytes < required_bytes:
+                raise InsufficientSpaceError(
+                    f"磁盘空间不足：至少需要 {format_size(required_bytes)}，"
+                    f"扣除已预留空间后可用 {format_size(max(0, available_bytes))}。"
+                )
+            self._reserved_bytes += amount
+
+        try:
+            yield
+        finally:
+            with self._lock:
+                self._reserved_bytes -= amount
 
 
 def save_upload(

@@ -15,6 +15,7 @@ from wsgiref.util import setup_testing_defaults
 from support import temporary_directory
 
 from landrop.lifecycle import SessionLifecycle
+from landrop.storage import UploadResult
 from landrop.trust import CredentialStore
 from landrop.web import StartResponse, TrackedIterable, WebConfig, create_application
 
@@ -234,6 +235,130 @@ class BottleApplicationTests(unittest.TestCase):
         self.assertEqual(snapshot.statistics["failed_upload_mb"], 0.000005)
         self.assertEqual(snapshot.statistics["failures"], {"client_disconnect": 1})
         self.assertEqual(list(self.received.iterdir()), [])
+
+    def test_upload_routes_share_two_slots_and_reject_before_multipart_parse(self) -> None:
+        cookie, csrf = self._trusted_session()
+        active_uploads = 0
+        active_lock = threading.Lock()
+        two_uploads_started = threading.Event()
+        release_uploads = threading.Event()
+
+        def blocked_save_upload(
+            _source: object,
+            filename: str,
+            _directory: Path,
+            _max_bytes: int,
+            **_callbacks: object,
+        ) -> UploadResult:
+            nonlocal active_uploads
+            with active_lock:
+                active_uploads += 1
+                if active_uploads == 2:
+                    two_uploads_started.set()
+            if not release_uploads.wait(timeout=5):
+                raise TimeoutError("test did not release blocked uploads")
+            return UploadResult(filename, 0, False)
+
+        multipart_body, multipart_type = multipart_upload(csrf, "phone.bin", b"p")
+        raw_body = b"c"
+        results: list[tuple[str, dict[str, str], bytes]] = []
+
+        def submit_multipart() -> None:
+            results.append(
+                wsgi_request(
+                    self.app,
+                    "/upload",
+                    method="POST",
+                    body=multipart_body,
+                    content_type=multipart_type,
+                    cookie=cookie,
+                )
+            )
+
+        def submit_raw() -> None:
+            results.append(
+                wsgi_request(
+                    self.app,
+                    "/upload/raw",
+                    method="POST",
+                    body=raw_body,
+                    content_type="application/octet-stream",
+                    cookie=cookie,
+                    extra_headers={
+                        "HTTP_X_LANDROP_CSRF": csrf,
+                        "HTTP_X_LANDROP_FILENAME": "computer.bin",
+                    },
+                )
+            )
+
+        with patch("landrop.web.save_upload", side_effect=blocked_save_upload):
+            workers = [threading.Thread(target=submit_multipart), threading.Thread(target=submit_raw)]
+            for worker in workers:
+                worker.start()
+            self.assertTrue(two_uploads_started.wait(timeout=5))
+            with patch(
+                "landrop.web._valid_csrf",
+                side_effect=AssertionError("busy multipart request was parsed"),
+            ) as validate_csrf:
+                busy_body, busy_type = multipart_upload(csrf, "busy.bin", b"x")
+                status, headers, body = wsgi_request(
+                    self.app,
+                    "/upload",
+                    method="POST",
+                    body=busy_body,
+                    content_type=busy_type,
+                    cookie=cookie,
+                )
+            validate_csrf.assert_not_called()
+            self.assertTrue(status.startswith("429"), body.decode())
+            self.assertEqual(headers["Retry-After"], "2")
+            self.assertIn("稍后重试", body.decode())
+            release_uploads.set()
+            for worker in workers:
+                worker.join(timeout=5)
+
+        self.assertTrue(all(not worker.is_alive() for worker in workers))
+        self.assertEqual(len(results), 2)
+        self.assertTrue(all(status.startswith("201") for status, _headers, _body in results))
+        snapshot = self.lifecycle.snapshot()
+        self.assertEqual(snapshot.active_transfers, 0)
+        self.assertEqual(snapshot.statistics["rejections"], {"upload_busy": 1})
+
+    def test_upload_slot_is_released_after_uncaught_storage_error(self) -> None:
+        cookie, csrf = self._trusted_session()
+        successful_result = UploadResult("retry.bin", 1, False)
+        with patch(
+            "landrop.web.save_upload",
+            side_effect=[RuntimeError("simulated disk failure"), successful_result],
+        ):
+            first_status, _headers, _body = wsgi_request(
+                self.app,
+                "/upload/raw",
+                method="POST",
+                body=b"x",
+                content_type="application/octet-stream",
+                cookie=cookie,
+                extra_headers={
+                    "HTTP_X_LANDROP_CSRF": csrf,
+                    "HTTP_X_LANDROP_FILENAME": "first.bin",
+                },
+            )
+            second_status, _headers, _body = wsgi_request(
+                self.app,
+                "/upload/raw",
+                method="POST",
+                body=b"x",
+                content_type="application/octet-stream",
+                cookie=cookie,
+                extra_headers={
+                    "HTTP_X_LANDROP_CSRF": csrf,
+                    "HTTP_X_LANDROP_FILENAME": "retry.bin",
+                },
+            )
+
+        self.assertTrue(first_status.startswith("500"), first_status)
+        self.assertTrue(second_status.startswith("201"), second_status)
+        self.assertEqual(self.lifecycle.snapshot().active_transfers, 0)
 
     def _trusted_session(self) -> tuple[str, str]:
         _client, credential = self.store.issue("Test Browser")
