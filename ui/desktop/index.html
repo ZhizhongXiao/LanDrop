@@ -120,6 +120,21 @@
         </form>
       </dialog>
 
+      <dialog id="confirmDialog" class="confirm-dialog" aria-labelledby="confirmTitle" aria-describedby="confirmMessage">
+        <form method="dialog" class="confirm-dialog-card">
+          <p class="section-index">CONFIRM ACTION</p>
+          <h2 id="confirmTitle">确认操作</h2>
+          <p id="confirmMessage" class="confirm-message"></p>
+          <div class="confirm-actions">
+            <button class="button ghost" type="submit" value="cancel">取消</button>
+            <button id="confirmAccept" class="button danger" type="submit" value="confirm">确认</button>
+          </div>
+        </form>
+      </dialog>
+      <div id="feedbackToast" class="feedback-toast" role="status" aria-live="polite" aria-atomic="true" hidden>
+        <div id="feedbackToastMessage" class="feedback-toast-card"></div>
+      </div>
+
       <section id="transferSettingsPage" class="page" data-parent-page="mainPage" data-title="传输设置" data-subtitle="选择本次服务使用的目录、上传上限和 Private 网络">
         <section class="panel configuration-panel">
           <header class="panel-heading">
@@ -145,9 +160,11 @@
                   <select id="interfaceSelector"><option value="">自动选择（仅一个可用 Private 网络）</option></select>
                   <button id="refreshInterfaces" class="icon-button" type="button" title="刷新网络" aria-label="刷新网络">↻</button>
                 </span>
+                <small>启动服务时采用；此选择不会随目录和上传上限一起保存。</small>
               </label>
             </div>
             <div class="configuration-actions"><button id="saveSettings" class="button secondary" type="button">保存设置</button></div>
+            <div id="transferSettingsNotice" class="notice" aria-live="polite"></div>
         </section>
       </section>
 
@@ -161,6 +178,7 @@
               <button id="revokeAll" class="button danger-outline compact" type="button">撤销全部信任</button>
             </div>
           </header>
+          <div id="clientsNotice" class="notice" aria-live="polite"></div>
           <div id="clients" class="clients"><span class="subtitle">正在读取…</span></div>
         </section>
       </section>
@@ -208,6 +226,7 @@
             </section>
           </div>
         </details>
+        <div id="infoNotice" class="notice page-notice" aria-live="polite"></div>
       </section>
 
       <section id="settingsPage" class="page" aria-label="设置与恢复">

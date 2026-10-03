@@ -8,6 +8,7 @@ let countdownActive = false;
 let countdownTarget = 0;
 let trustedRefreshTimer = null;
 let trustedRefreshStopTimer = null;
+let feedbackToastTimer = null;
 
 const reasonLabels = {
   manual_stop: "用户手动停止",
@@ -31,14 +32,60 @@ const reasonLabels = {
   deadline_expired: "会话到期"
 };
 
+function setNotice(target, message, isError = false) {
+  const element = typeof target === "string" ? $(target) : target;
+  if (!element) return;
+  element.textContent = message || "";
+  element.classList.add("notice");
+  element.classList.toggle("error", Boolean(message && isError));
+}
+
+function activeNotice() {
+  return document.querySelector(".page.active .notice") || $("notice");
+}
+
 function showError(message) {
-  $("notice").textContent = message || "";
-  $("notice").className = message ? "notice error" : "notice";
+  setNotice(activeNotice(), message, true);
 }
 
 function showInfo(message) {
-  $("notice").textContent = message || "";
-  $("notice").className = "notice";
+  setNotice(activeNotice(), message);
+}
+
+function showToast(message, { isError = false, duration = 2200 } = {}) {
+  if (feedbackToastTimer !== null) clearTimeout(feedbackToastTimer);
+  const toast = $("feedbackToast");
+  toast.classList.remove("visible");
+  toast.classList.toggle("error", isError);
+  $("feedbackToastMessage").textContent = message;
+  toast.hidden = false;
+  void toast.offsetWidth;
+  toast.classList.add("visible");
+  feedbackToastTimer = setTimeout(() => {
+    toast.classList.remove("visible");
+    feedbackToastTimer = setTimeout(() => {
+      toast.hidden = true;
+      feedbackToastTimer = null;
+    }, 160);
+  }, duration);
+}
+
+function confirmAction({ title, message, confirmLabel = "确认", danger = true }) {
+  const dialog = $("confirmDialog");
+  if (dialog.open) return Promise.resolve(false);
+  dialog.returnValue = "cancel";
+  $("confirmTitle").textContent = title;
+  $("confirmMessage").textContent = message;
+  const accept = $("confirmAccept");
+  accept.textContent = confirmLabel;
+  accept.className = `button ${danger ? "danger" : "primary"}`;
+
+  return new Promise(resolve => {
+    dialog.addEventListener("close", () => {
+      resolve(dialog.returnValue === "confirm");
+    }, { once: true });
+    dialog.showModal();
+  });
 }
 
 function reasonLabel(reason) {
@@ -304,9 +351,23 @@ function renderClients(clients) {
     revoke.className = "button secondary compact";
     revoke.textContent = "撤销信任";
     revoke.addEventListener("click", async () => {
-      if (!confirm(`确定撤销客户机“${id.textContent}”的信任吗？`)) return;
-      const result = await window.pywebview.api.revoke_trusted_client(client.client_id);
-      if (!result.ok) showError(result.error); else renderClients(result.clients);
+      const clientName = id.textContent;
+      const confirmed = await confirmAction({
+        title: "撤销客户机信任",
+        message: `确定撤销“${clientName}”的信任吗？该浏览器下次访问时需要重新配对。`,
+        confirmLabel: "撤销"
+      });
+      if (!confirmed) return;
+      try {
+        const result = await window.pywebview.api.revoke_trusted_client(client.client_id);
+        if (!result.ok) showError(result.error);
+        else {
+          renderClients(result.clients);
+          showInfo(`已撤销“${clientName}”的信任。`);
+        }
+      } catch (error) {
+        showError(`撤销客户机信任失败：${error}`);
+      }
     });
     main.append(id, meta, details);
     row.append(main, revoke);
@@ -314,36 +375,49 @@ function renderClients(clients) {
   }
 }
 
-async function refreshClients() {
-  const result = await window.pywebview.api.list_trusted_clients();
-  if (!result.ok) showError(result.error); else renderClients(result.clients);
+async function refreshClients({ showFeedback = false } = {}) {
+  try {
+    const result = await window.pywebview.api.list_trusted_clients();
+    if (!result.ok) showError(result.error);
+    else {
+      renderClients(result.clients);
+      if (showFeedback) showInfo(`客户机列表已刷新（${result.clients.length} 台）。`);
+    }
+  } catch (error) {
+    showError(`刷新客户机列表失败：${error}`);
+  }
 }
 
-async function refreshInterfaces() {
+async function refreshInterfaces({ showFeedback = false } = {}) {
   const selector = $("interfaceSelector");
   const previous = selector.value;
-  const result = await window.pywebview.api.list_interfaces();
-  if (!result.ok) {
-    showError(result.error);
-    return;
-  }
-  selector.replaceChildren();
-  const automatic = document.createElement("option");
-  automatic.value = "";
-  automatic.textContent = "自动选择（仅一个可用 Private 网络）";
-  selector.appendChild(automatic);
-  for (const item of result.interfaces || []) {
-    if (item.role === "excluded") continue;
-    const option = document.createElement("option");
-    option.value = item.address || "";
-    const usable = String(item.category || "").toLowerCase() === "private";
-    option.disabled = !usable;
-    const alias = item.alias || "未命名接口";
-    const profileName = item.description && item.description !== alias ? ` · ${item.description}` : "";
-    option.textContent = `${alias}${profileName} · ${item.address || "无 IPv4"} · ${item.category || "类别未知"}${usable ? "" : " · 不可选"}`;
-    selector.appendChild(option);
-  }
-  if ([...selector.options].some(option => option.value === previous && !option.disabled)) {
-    selector.value = previous;
+  try {
+    const result = await window.pywebview.api.list_interfaces();
+    if (!result.ok) {
+      showError(result.error);
+      return;
+    }
+    selector.replaceChildren();
+    const automatic = document.createElement("option");
+    automatic.value = "";
+    automatic.textContent = "自动选择（仅一个可用 Private 网络）";
+    selector.appendChild(automatic);
+    for (const item of result.interfaces || []) {
+      if (item.role === "excluded") continue;
+      const option = document.createElement("option");
+      option.value = item.address || "";
+      const usable = String(item.category || "").toLowerCase() === "private";
+      option.disabled = !usable;
+      const alias = item.alias || "未命名接口";
+      const profileName = item.description && item.description !== alias ? ` · ${item.description}` : "";
+      option.textContent = `${alias}${profileName} · ${item.address || "无 IPv4"} · ${item.category || "类别未知"}${usable ? "" : " · 不可选"}`;
+      selector.appendChild(option);
+    }
+    if ([...selector.options].some(option => option.value === previous && !option.disabled)) {
+      selector.value = previous;
+    }
+    if (showFeedback) showInfo("网络列表已刷新；仅 Private 网络可选择。");
+  } catch (error) {
+    showError(`刷新网络列表失败：${error}`);
   }
 }

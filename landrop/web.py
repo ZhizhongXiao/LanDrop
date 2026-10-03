@@ -236,13 +236,27 @@ def create_application(config: WebConfig) -> tuple[_TrackedApplication, str]:
           <section id="uploadPanel" class="transfer-panel upload-panel" hidden>
             <p class="panel-kicker">TO SERVER</p>
             <h2>上传到服务机</h2>
-            <p>单个文件上限：{html.escape(format_size(config.max_upload_bytes))}</p>
-            <form id="uploadForm" action="/upload" method="post" enctype="multipart/form-data">
+            <form id="uploadForm" class="upload-form" action="/upload" method="post" enctype="multipart/form-data">
               <input type="hidden" name="csrf" value="{csrf_token}">
-              <input id="uploadFile" type="file" name="file" multiple required>
-              <button id="uploadButton" type="submit">开始串行上传</button>
-              <button id="uploadCancel" class="secondary" type="button" hidden>停止整批</button>
-              <button id="uploadRetry" class="secondary" type="button" hidden>重试失败项</button>
+              <div class="upload-list-toolbar">
+                <div class="upload-list-heading">
+                  <strong>本机文件</strong>
+                  <span class="upload-limit">单个文件上限：<strong>{html.escape(format_size(config.max_upload_bytes))}</strong></span>
+                </div>
+                <label class="upload-file-picker" for="uploadFile">
+                  <span>选择文件</span>
+                  <input id="uploadFile" type="file" name="file" multiple required>
+                </label>
+              </div>
+              <div class="file-table upload-file-table">
+                <div class="file-header upload-file-grid" role="row">
+                  <span>名称</span>
+                  <span class="file-size">大小</span>
+                </div>
+                <ul id="uploadFileList" class="files upload-files">
+                  <li class="empty"><em>选择本机文件后将在此列出</em></li>
+                </ul>
+              </div>
             </form>
             <div id="uploadProgressBox" class="upload-progress" hidden>
               <progress id="uploadProgress" value="0" max="1"></progress>
@@ -255,6 +269,14 @@ def create_application(config: WebConfig) -> tuple[_TrackedApplication, str]:
           <span id="downloadSelection">尚未选择文件</span>
           <button id="downloadSelected" type="button" disabled>下载所选文件</button>
         </div>
+        <div id="uploadBulkBar" class="bulk-bar upload-bulk-bar" role="group" aria-label="批量上传" hidden>
+          <span id="uploadSelection">尚未选择文件</span>
+          <div class="upload-actions">
+            <button id="uploadCancel" class="secondary" type="button" hidden>停止整批</button>
+            <button id="uploadRetry" class="secondary" type="button" hidden>重试失败项</button>
+            <button id="uploadButton" type="submit" form="uploadForm" disabled>开始串行上传</button>
+          </div>
+        </div>
         <script>
           const downloadStatus = document.getElementById('downloadStatus');
           const downloadPanel = document.getElementById('downloadPanel');
@@ -265,8 +287,11 @@ def create_application(config: WebConfig) -> tuple[_TrackedApplication, str]:
           const selectAllDownloads = document.getElementById('selectAllDownloads');
           const downloadSelected = document.getElementById('downloadSelected');
           const downloadSelection = document.getElementById('downloadSelection');
+          const uploadBulkBar = document.getElementById('uploadBulkBar');
           const uploadForm = document.getElementById('uploadForm');
           const uploadFile = document.getElementById('uploadFile');
+          const uploadFileList = document.getElementById('uploadFileList');
+          const uploadSelection = document.getElementById('uploadSelection');
           const uploadButton = document.getElementById('uploadButton');
           const uploadCancel = document.getElementById('uploadCancel');
           const uploadRetry = document.getElementById('uploadRetry');
@@ -274,16 +299,42 @@ def create_application(config: WebConfig) -> tuple[_TrackedApplication, str]:
           const uploadProgress = document.getElementById('uploadProgress');
           const uploadStatus = document.getElementById('uploadStatus');
           const uploadResults = document.getElementById('uploadResults');
+          let sessionPollFailures = 0;
+          let sessionPollInFlight = false;
           const uploadCsrf = {json.dumps(csrf_token)};
           let currentUpload = null;
           let stopUploadQueue = false;
           let failedUploads = [];
+
+          async function checkServerAvailability() {{
+            if (sessionPollInFlight) return;
+            sessionPollInFlight = true;
+            const controller = new AbortController();
+            const timeout = window.setTimeout(() => controller.abort(), 2500);
+            try {{
+              const response = await fetch('/session-status', {{
+                cache: 'no-store', signal: controller.signal
+              }});
+              if (response.status === 401 || response.status === 503) {{
+                window.location.replace('about:blank');
+                return;
+              }}
+              sessionPollFailures = response.ok ? 0 : sessionPollFailures + 1;
+            }} catch {{
+              sessionPollFailures += 1;
+            }} finally {{
+              window.clearTimeout(timeout);
+              sessionPollInFlight = false;
+            }}
+            if (sessionPollFailures >= 3) window.location.replace('about:blank');
+          }}
 
           function setTransferMode(mode) {{
             const downloading = mode === 'download';
             downloadPanel.hidden = !downloading;
             uploadPanel.hidden = downloading;
             downloadSelected.closest('.bulk-bar').hidden = !downloading;
+            uploadBulkBar.hidden = downloading;
             showDownloads.classList.toggle('active', downloading);
             showUploads.classList.toggle('active', !downloading);
             showDownloads.setAttribute('aria-selected', String(downloading));
@@ -293,6 +344,46 @@ def create_application(config: WebConfig) -> tuple[_TrackedApplication, str]:
 
           function uploadMegabytes(bytes) {{
             return (bytes / 1000000).toFixed(2);
+          }}
+
+          function formatUploadFileSize(bytes) {{
+            const units = ['B', 'KB', 'MB', 'GB'];
+            let size = bytes;
+            let unit = 0;
+            while (size >= 1000 && unit < units.length - 1) {{
+              size /= 1000;
+              unit += 1;
+            }}
+            return `${{unit === 0 ? size : size.toFixed(2)}} ${{units[unit]}}`;
+          }}
+
+          function updateUploadSelection() {{
+            const files = [...uploadFile.files];
+            const totalBytes = files.reduce((sum, file) => sum + file.size, 0);
+            uploadSelection.textContent = files.length
+              ? `已选 ${{files.length}} 个文件 · ${{formatUploadFileSize(totalBytes)}}`
+              : '尚未选择文件';
+            uploadButton.disabled = files.length === 0;
+            uploadFileList.replaceChildren();
+            if (!files.length) {{
+              const empty = document.createElement('li');
+              empty.className = 'empty';
+              empty.textContent = '选择本机文件后将在此列出';
+              uploadFileList.append(empty);
+              return;
+            }}
+            for (const file of files) {{
+              const row = document.createElement('li');
+              row.className = 'upload-file-grid upload-file-row';
+              const name = document.createElement('span');
+              name.className = 'upload-file-name';
+              name.textContent = file.name;
+              const size = document.createElement('span');
+              size.className = 'upload-file-size';
+              size.textContent = formatUploadFileSize(file.size);
+              row.append(name, size);
+              uploadFileList.append(row);
+            }}
           }}
 
           function updateDownloadSelection() {{
@@ -344,7 +435,7 @@ def create_application(config: WebConfig) -> tuple[_TrackedApplication, str]:
               try {{
                 await beginDownload(link.dataset.ticketUrl, link.textContent);
               }} catch (_error) {{
-                downloadStatus.textContent = '无法开始下载；服务可能已停止或网络已经变化。';
+                downloadStatus.textContent = '无法开始下载。';
               }}
             }});
           }}
@@ -378,7 +469,7 @@ def create_application(config: WebConfig) -> tuple[_TrackedApplication, str]:
           }});
 
           function setUploadControls(running) {{
-            uploadButton.disabled = running;
+            uploadButton.disabled = running || uploadFile.files.length === 0;
             uploadFile.disabled = running;
             uploadCancel.hidden = !running;
           }}
@@ -457,13 +548,17 @@ def create_application(config: WebConfig) -> tuple[_TrackedApplication, str]:
             event.preventDefault();
             runUploadQueue([...uploadFile.files]);
           }});
+          uploadFile.addEventListener('change', updateUploadSelection);
           uploadCancel.addEventListener('click', () => {{
             stopUploadQueue = true;
             if (currentUpload) currentUpload.abort();
           }});
           uploadRetry.addEventListener('click', () => runUploadQueue([...failedUploads]));
           updateDownloadSelection();
+          updateUploadSelection();
           setTransferMode('download');
+          checkServerAvailability();
+          window.setInterval(checkServerAvailability, 3000);
         </script>
         """
         return _page("LanDrop", body)
@@ -538,7 +633,7 @@ def create_application(config: WebConfig) -> tuple[_TrackedApplication, str]:
               anchor.remove();
               statusNode.textContent = '已交给浏览器下载；再次点击会创建一个新的文件任务。';
             }} catch (_error) {{
-              statusNode.textContent = '无法开始下载，服务可能已停止。';
+              statusNode.textContent = '无法开始下载。';
             }} finally {{
               link.disabled = false;
             }}
@@ -546,6 +641,7 @@ def create_application(config: WebConfig) -> tuple[_TrackedApplication, str]:
           link.addEventListener('click', beginDownload);
           setTimeout(beginDownload, 100);
           let polling = true;
+          let pollFailures = 0;
           async function pollStatus() {{
             const controller = new AbortController();
             const timeout = setTimeout(() => controller.abort(), 1500);
@@ -555,14 +651,18 @@ def create_application(config: WebConfig) -> tuple[_TrackedApplication, str]:
               }});
               if (!response.ok) throw new Error('service-stopped');
               const state = await response.json();
+              pollFailures = 0;
               if (state.phase === 'grace') {{
                 statusNode.textContent = `会话已到期，当前下载处于宽限期，剩余 ${{state.grace_remaining_seconds}} 秒。`;
               }} else {{
                 statusNode.textContent = `下载进行中；会话剩余 ${{state.remaining_seconds}} 秒。`;
               }}
             }} catch (_error) {{
-              polling = false;
-              statusNode.textContent = '服务已停止或网络中断。下载可能显示为“已暂停”；重新启动 LanDrop 后可在浏览器下载管理器中尝试继续。';
+              pollFailures += 1;
+              if (pollFailures >= 3) {{
+                polling = false;
+                window.location.replace('about:blank');
+              }}
             }} finally {{
               clearTimeout(timeout);
               if (polling) setTimeout(pollStatus, 750);
@@ -1141,7 +1241,7 @@ def _page(title: str, body: str) -> str:
   <style>
     :root {{ color-scheme: light dark; font-family: "Source Han Sans SC", "Noto Sans CJK SC", "Microsoft YaHei UI", system-ui, sans-serif; }}
     body {{ margin: 0; padding-bottom: 88px; background: linear-gradient(150deg, #edf4fc, #f8fafc 58%, #eef7f6); color: #182230; font-size: 16px; line-height: 1.5; }}
-    body[data-transfer-mode="upload"] {{ padding-bottom: 24px; }}
+    body[data-transfer-mode="upload"] {{ padding-bottom: 88px; }}
     header, main {{ width: min(760px, calc(100% - 32px)); margin: 24px auto; }}
     main {{ display: grid; gap: 18px; }}
     section, .narrow {{ background: white; border-radius: 14px; padding: 20px; box-shadow: 0 5px 20px #18223012; }}
@@ -1155,13 +1255,33 @@ def _page(title: str, body: str) -> str:
     .transfer-tabs {{ display: grid; grid-template-columns: 1fr 1fr; gap: 8px; padding: 6px; border: 1px solid #d7e2ef; border-radius: 14px; background: #e7eef7; }}
     .transfer-tab {{ min-height: 48px; background: transparent; color: #475467; font-weight: 700; }}
     .transfer-tab.active {{ background: #fff; color: #075ea8; box-shadow: 0 4px 14px #18223016; }}
-    .transfer-panel {{ position: relative; overflow: hidden; border: 1px solid transparent; }}
-    .download-panel {{ border-color: #bfdbf3; }}
-    .upload-panel {{ border-color: #bfe4db; }}
+    .transfer-panel {{ position: relative; overflow: hidden; border: 1px solid #d7e2ef; }}
+    .download-panel {{ --panel-accent: #1286d9; --panel-soft: #f2f8ff; }}
+    .upload-panel {{ --panel-accent: #087443; --panel-soft: #f1f8f5; }}
     .download-panel::before, .upload-panel::before {{ position: absolute; inset: 0 auto 0 0; width: 5px; content: ""; }}
-    .download-panel::before {{ background: #1286d9; }}
-    .upload-panel::before {{ background: #15966f; }}
-    .panel-kicker {{ margin: 0 0 6px; color: #667085; font-size: 12px; font-weight: 750; letter-spacing: .12em; }}
+    .download-panel::before, .upload-panel::before {{ background: var(--panel-accent); }}
+    .panel-kicker {{ margin: 0 0 6px; color: var(--panel-accent); font-size: 12px; font-weight: 750; letter-spacing: .12em; }}
+    body[data-transfer-mode="download"] #showDownloads.transfer-tab.active {{ color: #075ea8; }}
+    body[data-transfer-mode="upload"] #showUploads.transfer-tab.active {{ color: #087443; }}
+    .upload-limit {{ display: inline-flex; align-items: center; width: fit-content; max-width: 100%; margin: 0; padding: 4px 9px; border: 1px solid #d7e2ef; border-radius: 10px; background: var(--panel-soft); color: #475467; font-size: 13px; }}
+    .upload-limit strong {{ color: #182230; font-weight: 700; }}
+    .upload-form {{ display: grid; align-items: stretch; gap: 12px; }}
+    .upload-list-toolbar {{ display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px; color: #344054; }}
+    .upload-list-heading {{ display: flex; flex-wrap: wrap; align-items: center; gap: 10px; min-width: 0; }}
+    .upload-file-picker {{ position: relative; display: inline-flex; align-items: center; min-height: 38px; padding: 6px 12px; overflow: hidden; border: 1px solid #cbd8e6; border-radius: 8px; background: #fff; color: #344054; font-weight: 650; cursor: pointer; }}
+    .upload-file-picker span {{ pointer-events: none; }}
+    .upload-file-picker input {{ position: absolute; inset: 0; width: 100%; height: 100%; margin: 0; padding: 0; opacity: 0; cursor: pointer; }}
+    .upload-file-picker:focus-within {{ outline: 3px solid #15966f66; outline-offset: 2px; }}
+    .upload-file-table {{ min-width: 0; }}
+    .upload-file-grid {{ display: grid; grid-template-columns: minmax(0, 1fr) 92px; gap: 10px; align-items: center; }}
+    .upload-files {{ max-height: 220px; overflow: auto; }}
+    .upload-file-name {{ min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }}
+    .upload-file-size {{ color: #667085; font-size: 13px; text-align: right; white-space: nowrap; }}
+    .upload-actions {{ display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 8px; }}
+    .upload-actions button {{ min-height: 44px; padding: 10px 16px; }}
+    #uploadButton {{ min-width: 148px; background: #087443; }}
+    #uploadButton:hover:not(:disabled) {{ background: #06613a; }}
+    #uploadButton:focus-visible {{ outline: 3px solid #15966f66; outline-offset: 2px; }}
     .upload-progress {{ width: 100%; margin-top: 12px; }}
     .upload-progress progress {{ width: 100%; height: 16px; }}
     .upload-progress p {{ margin: 6px 0 0; overflow-wrap: anywhere; }}
@@ -1195,6 +1315,9 @@ def _page(title: str, body: str) -> str:
       form {{ align-items: stretch; }}
       form input[type="file"] {{ width: 100%; }}
       form button {{ flex: 1; min-height: 44px; }}
+      .upload-bulk-bar {{ align-items: stretch; flex-direction: column; }}
+      .upload-bulk-bar .upload-actions {{ display: grid; grid-template-columns: 1fr; }}
+      .upload-bulk-bar .upload-actions button {{ width: 100%; }}
       .transfer-tabs {{ position: sticky; top: 8px; z-index: 9; }}
       .transfer-tab {{ padding: 10px 8px; }}
       .pairing-field {{ grid-template-columns: 108px minmax(0, 1fr); gap: 10px; }}
@@ -1212,9 +1335,18 @@ def _page(title: str, body: str) -> str:
       .transfer-tabs {{ border-color: #344054; background: #131d29; }}
       .transfer-tab {{ color: #b7c0cf; }}
       .transfer-tab.active {{ background: #263447; color: #76c7ff; box-shadow: none; }}
-      .download-panel {{ border-color: #285a7d; }}
-      .upload-panel {{ border-color: #286a5a; }}
-      .panel-kicker, .pairing-field > span {{ color: #b7c0cf; }}
+      .transfer-panel {{ border-color: #344054; }}
+      .download-panel {{ --panel-accent: #76c7ff; --panel-soft: #1d2c3c; }}
+      .upload-panel {{ --panel-accent: #58c7a0; --panel-soft: #1d332e; }}
+      .upload-limit {{ border-color: #344054; color: #b7c0cf; }}
+      .upload-limit strong {{ color: #edf3fa; }}
+      .upload-list-toolbar {{ color: #d7e2ef; }}
+      .upload-file-picker {{ border-color: #475467; background: #263447; color: #edf3fa; }}
+      .upload-file-size {{ color: #b7c0cf; }}
+      #uploadButton {{ background: #087443; }}
+      #uploadButton:hover:not(:disabled) {{ background: #06613a; }}
+      #uploadButton:focus-visible, .upload-file-picker:focus-within {{ outline-color: #58c7a066; }}
+      .pairing-field > span {{ color: #b7c0cf; }}
       .file-table {{ border-color: #344054; }}
       .file-header {{ border-color: #344054; background: #202c3b; color: #d7e2ef; }}
       .files li {{ border-color: #344054; }}

@@ -83,6 +83,27 @@ class BottleApplicationTests(unittest.TestCase):
         self.assertIn("/upload/raw", decoded)
         self.assertIn("xhr.upload.addEventListener('progress'", decoded)
         self.assertIn('type="file" name="file" multiple', decoded)
+        self.assertIn('class="upload-form"', decoded)
+        self.assertIn('class="upload-list-toolbar"', decoded)
+        self.assertIn(
+            '<strong>本机文件</strong>\n                  <span class="upload-limit">单个文件上限：',
+            decoded,
+        )
+        self.assertNotIn('<p class="upload-limit">', decoded)
+        self.assertIn('class="upload-file-picker"', decoded)
+        self.assertIn('class="file-table upload-file-table"', decoded)
+        self.assertIn('id="uploadFileList"', decoded)
+        self.assertIn('id="uploadBulkBar" class="bulk-bar upload-bulk-bar"', decoded)
+        self.assertIn('form="uploadForm" disabled>开始串行上传', decoded)
+        self.assertIn('class="upload-actions"', decoded)
+        self.assertIn("uploadBulkBar.hidden = downloading", decoded)
+        self.assertIn("function updateUploadSelection()", decoded)
+        self.assertIn("formatUploadFileSize(file.size)", decoded)
+        self.assertIn("checkServerAvailability", decoded)
+        self.assertIn("sessionPollFailures >= 3", decoded)
+        self.assertIn("window.location.replace('about:blank')", decoded)
+        self.assertIn("window.setInterval(checkServerAvailability, 3000)", decoded)
+        self.assertIn("controller.abort()", decoded)
         self.assertIn('class="download-choice"', decoded)
         self.assertIn('id="selectAllDownloads"', decoded)
         self.assertIn(">名称</span>", decoded)
@@ -124,7 +145,12 @@ class BottleApplicationTests(unittest.TestCase):
             self.app, "/prepare-download/hello.txt", cookie=cookie
         )
         self.assertTrue(status.startswith("200"))
-        self.assertIn("下载可能显示为", body.decode())
+        download_status_page = body.decode()
+        self.assertIn("无法开始下载。", download_status_page)
+        self.assertIn("let pollFailures = 0", download_status_page)
+        self.assertIn("if (pollFailures >= 3)", download_status_page)
+        self.assertIn("window.location.replace('about:blank')", download_status_page)
+        self.assertNotIn("服务已停止或网络中断", download_status_page)
 
         status, _headers, body = wsgi_request(
             self.app, "/session-status", cookie=cookie
@@ -171,6 +197,12 @@ class BottleApplicationTests(unittest.TestCase):
         )
         self.assertTrue(status.startswith("404"), status)
         self.assertEqual(len(self.store.list_clients()), 1)
+
+        self.lifecycle.stop("test_server_shutdown")
+        status, _headers, _body = wsgi_request(
+            self.app, "/session-status", cookie=cookie
+        )
+        self.assertTrue(status.startswith("503"), status)
 
     def test_upload_requires_authentication(self) -> None:
         status, _headers, _body = wsgi_request(self.app, "/upload", method="POST")

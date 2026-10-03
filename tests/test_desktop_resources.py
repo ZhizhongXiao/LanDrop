@@ -54,6 +54,43 @@ class DesktopResourceTests(unittest.TestCase):
         referenced_ids = set(re.findall(r'\$\("([^"]+)"\)', scripts))
         self.assertEqual(referenced_ids - html_ids, set())
 
+    def test_desktop_actions_have_local_feedback_and_styled_confirmation(self) -> None:
+        html = (DESKTOP_ROOT / "index.html").read_text(encoding="utf-8")
+        for element_id in (
+            "transferSettingsNotice",
+            "clientsNotice",
+            "infoNotice",
+            "confirmDialog",
+            "confirmTitle",
+            "confirmMessage",
+            "confirmAccept",
+            "feedbackToast",
+            "feedbackToastMessage",
+        ):
+            self.assertIn(f'id="{element_id}"', html)
+        self.assertIn("此选择不会随目录和上传上限一起保存。", html)
+
+        app_script = (DESKTOP_ROOT / "js" / "app.js").read_text(encoding="utf-8")
+        state_script = (DESKTOP_ROOT / "js" / "state.js").read_text(encoding="utf-8")
+        desktop_scripts = f"{app_script}\n{state_script}"
+        self.assertNotRegex(desktop_scripts, r"\bconfirm\s*\(")
+        self.assertIn("function activeNotice()", state_script)
+        self.assertIn('element.classList.toggle("error"', state_script)
+        self.assertIn("function confirmAction(", state_script)
+        self.assertIn("function showToast(", state_script)
+        self.assertIn("目录和单文件上传上限已保存。", app_script)
+        self.assertIn('showToast(result.error || "保存设置失败。", { isError: true })', app_script)
+        self.assertIn("全部撤销", app_script)
+        self.assertIn("撤销客户机信任", state_script)
+
+        components = (DESKTOP_ROOT / "css" / "components.css").read_text(encoding="utf-8")
+        self.assertIn(".confirm-dialog::backdrop", components)
+        self.assertIn(".confirm-dialog-card", components)
+        self.assertIn("inset: 0", components)
+        self.assertIn("margin: auto", components)
+        self.assertIn(".feedback-toast {", components)
+        self.assertIn("place-items: center", components)
+
     def test_pyinstaller_spec_bundles_the_ui_tree(self) -> None:
         spec = (PROJECT_ROOT / "LanDrop.spec").read_text(encoding="utf-8")
         self.assertIn('project_root / "ui"', spec)
