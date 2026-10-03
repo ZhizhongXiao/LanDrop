@@ -1,12 +1,12 @@
 # 第八阶段详细计划：安装器、卸载器与分发
 
-状态：**Phase 8A～8E 开发实现、自动化回归和本机真实安装生命周期开发验收通过；RC1～RC6 已被取代；RC7 已从源码提交 `6feb6aa` 构建并冻结，198/198 全量回归通过；Phase 8F 干净 Windows 11 最终发布验收尚未完成（2026-09-28）**。
+状态：**Phase 8A～8E 开发实现、自动化回归和本机真实安装生命周期开发验收通过；RC1～RC7 已在最终发布验收前被取代；RC8 已从运行时代码提交 `48ca00b` 构建并冻结，Build ID 为 `0.6.0-48ca00b-20261003151009`，199/199 全量回归通过；Phase 8F 干净 Windows 11 最终发布验收尚未完成（2026-10-03）**。
 
 资源边界更新（2026-09-28）：LAN 与 loopback 共用最多 16 个 HTTP worker slot，accepted socket 单次 I/O 空闲超时 30 秒；`/upload` 和 `/upload/raw` 共用最多 2 个并发上传 slot，第三个请求立即返回 HTTP 429 与 `Retry-After: 2`；进程内空间 reservation 从实际空闲空间中扣除已承诺上传字节，并只保留一次 10 MiB 安全余量，所有成功、失败和异常路径均释放。multipart 在取得 slot 与空间 reservation 前不读取 forms/files。实现保留 Bottle/wsgiref，不改变协议、Range、SessionLifecycle、5 分钟 session 或 60 秒 grace。它限制无界资源增长，但持续恶意连接仍可占满 16 个 slot 并暂时导致拒绝服务；不宣称为通用 DoS 防护。完整回归共 198 项通过。
 
-RC6 已于最终发布验收前被 RC7 取代；历史构建记录保留在 `docs/releases/0.6.0-rc6.md`，不得用于 Phase 8F。
+RC6 已于最终发布验收前被 RC7 取代，RC7 又因冻结后的 UI 行为更新被 RC8 取代；历史构建记录分别保留在 `docs/releases/0.6.0-rc6.md` 与 `docs/releases/0.6.0-rc7.md`，不得用于 Phase 8F。
 
-RC7 冻结记录：详见 `docs/releases/0.6.0-rc7.md`。Build ID 为 `0.6.0-6feb6aa-20260928035021`；冻结产物位于 `C:\Projects\LanDrop-ReleaseCandidates\0.6.0-rc7-6feb6aa`，Setup / Uninstall / 主程序 onedir 自检全部通过。RC7 加入 Windows 多扩展名保留设备名修复。该候选仅供 Phase 8F 使用，干净 Windows 11 最终发布验收仍为 pending。
+RC8 冻结记录：详见 `docs/releases/0.6.0-rc8.md`。运行时代码锚点为 `48ca00bc4cf5ba10e3c9fc0e920fd608d89c928f`，Build ID 为 `0.6.0-48ca00b-20261003151009`；冻结产物位于 `C:\Projects\LanDrop-ReleaseCandidates\0.6.0-rc8-48ca00b`，Setup / Uninstall / 主程序 onedir 自检及 payload manifest 校验全部通过。RC8 包含桌面 GUI 操作反馈/品牌确认框，以及客户端下载/上传视图调整。测试同步提交 `bd1c167` 仅修正停止状态轮询时序，不修改运行时代码。该候选仅供 Phase 8F 使用，干净 Windows 11 最终发布验收仍为 pending。
 
 后续验证记录：`70311758e9af5247b90afc72c1c68ccc00bac12a` 只增强测试代码，不修改当时已冻结的 RC6 二进制；停滞连接 timeout/slot 释放及容量不足、ENOSPC、StorageError、客户端断开、session stop 后上传资源释放均有明确回归覆盖。文件名修复提交 `6feb6aa` 补充多扩展名设备名及 COM/LPT 上标数字测试；RC7 源码上的全量回归为 198/198。
 
@@ -17,6 +17,7 @@ RC7 冻结记录：详见 `docs/releases/0.6.0-rc7.md`。Build ID 为 `0.6.0-6fe
 > 0.6.0-rc4 was superseded before final release acceptance by startup network fail-closed and server-enforced credential expiry fixes.
 > 0.6.0-rc5 was superseded before final release acceptance by the 3-client / 5-day trust policy change.
 > 0.6.0-rc6 was superseded before final release acceptance by the Windows reserved multi-extension filename fix.
+> 0.6.0-rc7 was superseded before final release acceptance by post-RC7 desktop/browser UI behavior changes.
 
 前置条件：第七阶段开发验收已通过并冻结为第八阶段基线。当前已有 Python 3.12 x64 + PyInstaller 6.22.3 `--onedir` 主程序构建、统一资源定位、单实例、WebView2 Runtime 检查、滚动日志、托盘/Toast、Private/Public 网络边界及 94 项自动化回归证据。第七阶段正式无 Python/无源码干净 Windows 11 验收因测试机暂不可用而延期，必须在第八阶段最终发布验收中一并补齐。
 
@@ -866,7 +867,7 @@ Phase 8E 最终功能基线提交：`22d77ebe4e251aeeb6cd97a734ccb2978ac853e2`�
 
 ## 十、Phase 8F：干净 Windows 11 最终发布验收
 
-当前用于 P8-R01～R04 的唯一冻结候选为 RC7：见 `docs/releases/0.6.0-rc7.md`。RC6 及更早候选均已被取代，不得使用。
+当前用于 P8-R01～R04 的唯一冻结候选为 RC8：见 `docs/releases/0.6.0-rc8.md`，验收清单为 `docs/plans/PHASE8F_RC8_ACCEPTANCE_CHECKLIST.md`。RC7 及更早候选均已被取代，不得使用。
 
 ### P8-R01：测试机要求
 
