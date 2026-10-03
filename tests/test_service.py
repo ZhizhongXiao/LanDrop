@@ -9,7 +9,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from landrop.network import EndpointBaseline, EndpointObservation
-from landrop.service import ServiceController, ServiceError
+from landrop.service import ServiceController, ServiceError, ServiceSnapshot
 from landrop.trust import CredentialStore
 from landrop.web import WebConfig
 from tests.support import temporary_directory
@@ -146,6 +146,15 @@ class ServiceControllerTests(unittest.TestCase):
             category_check_interval=category_check_interval,
             endpoint_confirmation_delay=endpoint_confirmation_delay,
         )
+
+    def _wait_for_stopped_state(self, timeout: float = 1.5) -> ServiceSnapshot:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            state = self.controller.snapshot()
+            if not state.running and state.phase != "stopping":
+                return state
+            time.sleep(0.02)
+        return self.controller.snapshot()
 
     def tearDown(self) -> None:
         self.controller.stop()
@@ -394,11 +403,7 @@ class ServiceControllerTests(unittest.TestCase):
         )
 
         self.controller.start(self.shared, self.received)
-        deadline = time.monotonic() + 1.5
-        while self.controller.snapshot().running and time.monotonic() < deadline:
-            time.sleep(0.02)
-
-        state = self.controller.snapshot()
+        state = self._wait_for_stopped_state()
         self.assertFalse(state.running)
         self.assertEqual(state.stop_reason, "network_category_unavailable")
         self.assertEqual(state.endpoint_status, "unavailable")
@@ -424,11 +429,7 @@ class ServiceControllerTests(unittest.TestCase):
         )
 
         self.controller.start(self.shared, self.received)
-        deadline = time.monotonic() + 1.5
-        while self.controller.snapshot().running and time.monotonic() < deadline:
-            time.sleep(0.02)
-
-        state = self.controller.snapshot()
+        state = self._wait_for_stopped_state()
         self.assertFalse(state.running)
         self.assertEqual(state.stop_reason, "network_category_unavailable")
         self.assertEqual(state.endpoint_status, "unavailable")
@@ -450,11 +451,7 @@ class ServiceControllerTests(unittest.TestCase):
         )
 
         self.controller.start(self.shared, self.received)
-        deadline = time.monotonic() + 1.5
-        while self.controller.snapshot().running and time.monotonic() < deadline:
-            time.sleep(0.02)
-
-        state = self.controller.snapshot()
+        state = self._wait_for_stopped_state()
         self.assertFalse(state.running)
         self.assertEqual(state.stop_reason, "network_changed")
         self.assertEqual(state.endpoint_status, "changed")
@@ -476,11 +473,7 @@ class ServiceControllerTests(unittest.TestCase):
         )
 
         self.controller.start(self.shared, self.received)
-        deadline = time.monotonic() + 1.5
-        while self.controller.snapshot().running and time.monotonic() < deadline:
-            time.sleep(0.02)
-
-        state = self.controller.snapshot()
+        state = self._wait_for_stopped_state()
         self.assertFalse(state.running)
         self.assertEqual(state.stop_reason, "network_changed")
         self.assertIn("Public", state.endpoint_detail)
