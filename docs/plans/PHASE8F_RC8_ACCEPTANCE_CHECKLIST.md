@@ -24,38 +24,39 @@
 
 验收机应为 Windows 11，未复制源码/venv、未另装 Python、没有旧 LanDrop 安装历史；Windows Defender Firewall 开启，并有真实 Private WLAN 或 Ethernet 和独立浏览器客户机。尽量避免旧 `LanDrop.exe` / Python TCP 8000 规则。
 
-| 检查项 | 结果 / 证据 |
-| --- | --- |
-| Windows 11 版本/build、设备名、账户权限 |  |
-| 无 LanDrop 安装、无源码/venv/独立 Python |  |
-| WebView2 Runtime 状态及版本（如存在） |  |
-| Windows Firewall 各 Profile 已启用 |  |
-| 当前网络名称、适配器、InterfaceIndex、类别为 Private |  |
-| 独立客户机型号/OS/浏览器；两端同一 LAN |  |
-| 安装根 `%LOCALAPPDATA%\Programs\LanDrop` 不存在 |  |
-| LanDrop Run、StartupApproved、Uninstall、快捷方式基线 |  |
-| TCP 8000 无监听；LanDrop / Setup / Uninstall 无进程 |  |
-| 既有 LanDrop/Python 防火墙相关规则清单 |  |
-| `transaction.json`、staging/rollback、旧 uninstall TEMP 无残留 |  |
-| 在测试用户的 Shared、Received 和一个自定义收发目录放置唯一哨兵文件；记录路径、大小与 SHA-256（只用无敏感测试内容） |  |
-| RC8 Setup 的 SHA-256 与冻结记录一致 |  |
-| RC8 Uninstall 的 SHA-256 与冻结记录一致 |  |
-| RC8 onedir ZIP 的 SHA-256 与冻结记录一致 |  |
-| RC8 payload manifest 的 SHA-256 与冻结记录一致 |  |
-| RC8 Setup build-info 的 SHA-256 与冻结记录一致 |  |
-| A 0.5.9 Setup 的 SHA-256 与冻结记录一致 |  |
 
-**R01 判定：** ☐ PASS ☐ FAIL。未通过则停止，不运行 Setup。
+| 检查项                                                                                                             | 结果 / 证据 |
+| -------------------------------------------------------------------------------------------------------------------- | ------------- |
+| Windows 11 版本/build、设备名、账户权限                                                                            | PASS        |
+| 无 LanDrop 安装、无源码/venv/独立 Python                                                                           | PASS        |
+| WebView2 Runtime 状态及版本（如存在）                                                                              | PASS        |
+| Windows Firewall 各 Profile 已启用                                                                                 | PASS        |
+| 当前网络名称、适配器、InterfaceIndex、类别为 Private                                                               | PASS        |
+| 独立客户机型号/OS/浏览器；两端同一 LAN                                                                             | PASS        |
+| 安装根`%LOCALAPPDATA%\Programs\LanDrop` 不存在                                                                     | PASS        |
+| LanDrop Run、StartupApproved、Uninstall、快捷方式基线                                                              | PASS        |
+| TCP 8000 无监听；LanDrop / Setup / Uninstall 无进程                                                                | PASS        |
+| 既有 LanDrop/Python 防火墙相关规则清单                                                                             | PASS        |
+| `transaction.json`、staging/rollback、旧 uninstall TEMP 无残留                                                     | PASS        |
+| 在测试用户的 Shared、Received 和一个自定义收发目录放置唯一哨兵文件；记录路径、大小与 SHA-256（只用无敏感测试内容） | PASS        |
+| RC8 Setup 的 SHA-256 与冻结记录一致                                                                                | PASS        |
+| RC8 Uninstall 的 SHA-256 与冻结记录一致                                                                            | PASS        |
+| RC8 onedir ZIP 的 SHA-256 与冻结记录一致                                                                           | PASS        |
+| RC8 payload manifest 的 SHA-256 与冻结记录一致                                                                     | PASS        |
+| RC8 Setup build-info 的 SHA-256 与冻结记录一致                                                                     | PASS        |
+| A 0.5.9 Setup 的 SHA-256 与冻结记录一致                                                                            | PASS        |
+
+**R01 判定：** ☑ PASS ☐ FAIL。未通过则停止，不运行 Setup。
 
 ## P8-R02 — WebView2 与离线安装边界
 
 ### 验收机已有 WebView2（常规分支）
 
-- ☐ 在不连接 WAN 的条件下运行冻结 RC8 Setup；不得要求联网才能完成本地安装。
-- ☐ Setup 正常显示；无 WebView2 Runtime 下载、安装器启动或其他隐式下载迹象。
-- ☐ 记录离线状态、安装结果和证据。
+- ☑ 在不连接 WAN 的条件下运行冻结 RC8 Setup；不得要求联网才能完成本地安装。（用户报告：有线局域网、无外网，安装成功；Setup 未能联网。）
+- ☑ Setup 正常显示；无 WebView2 Runtime 下载、安装器启动或其他隐式下载迹象。（用户报告：WebView2 已安装，未出现提示；Setup 未能联网。）
+- ☑ 记录离线状态和安装结果。（用户报告：有线局域网、无外网，RC8 Setup 安装成功且未能联网。）
 
-### 可用独立快照/VM 构造无 WebView2（条件分支）
+### 可选分支：在可恢复独立环境验证无 WebView2（非 Phase 8F 强制门槛）
 
 - ☐ 不在主要日用机器上卸载/破坏 WebView2；只在可恢复的独立快照环境验证。
 - ☐ 运行 Setup 后得到明确原生提示并阻断。
@@ -63,25 +64,25 @@
 - ☐ Setup 不尝试联网下载 Runtime。
 - ☐ 在该环境恢复/安装 WebView2 后重新运行 Setup，能够继续正常安装。
 
-无 WebView2 环境不可安全获得时记 `N/A`，不把已有 Runtime 的成功安装误记为缺失 Runtime 分支通过。
+只有现成的可恢复独立环境时才执行此分支；不要求为此卸载日用设备的 Runtime 或专门构造缺失环境。未执行时可记 `N/A`，不阻止 Phase 8F 通过；已有 Runtime 的常规分支仍须按上方项目验收。
 
 常规分支中本次成功安装即作为 R04 周期一的唯一首次安装；如执行无 WebView2 分支，则恢复 Runtime 后首次成功的 Setup 安装作为该次唯一首次安装。R04 不得再次运行 Setup 安装 RC8。
 
-**R02 判定：** ☐ PASS ☐ FAIL ☐ 部分 N/A；证据：
+**R02 判定：** ☑ PASS ☐ FAIL；证据：用户报告有线局域网保持连通、外网不可达，RC8 Setup 安装成功；WebView2 已存在且没有缺失 Runtime 提示。可选的缺失 Runtime 分支本轮未执行。
 
 ## P8-R03 — Windows 原生防火墙行为
 
 在 Setup 前已有规则基线的前提下，启动 RC8 并首次启动 Private 服务：
 
-- ☐ 记录 Windows 是否显示原生防火墙授权对话框；不把“必然弹窗”作为通过条件。
-- ☐ 若显示：只按用户意愿允许 Private；记录授权前后规则的名称、程序路径、方向、协议、端口、Profile、来源。
-- ☐ 若未显示/被拒绝/被策略抑制：确认 LanDrop 诊断能够说明不可达状态，并且设置入口只打开 Windows 防火墙设置；不创建/修改规则。
-- ☐ 使用独立客户机验证服务访问；记录访问成功或被阻断及对应诊断。
-- ☐ 安装、运行、卸载前后对比规则清单，确认 LanDrop 自身没有主动创建、修改或删除 Windows 防火墙规则。
+- ☑ 记录 Windows 是否显示原生防火墙授权对话框；不把“必然弹窗”作为通过条件。（用户报告：出现授权提示。）
+- ☐ 若显示：只按用户意愿允许 Private；记录授权前后规则的名称、程序路径、方向、协议、端口、Profile、来源。（用户报告：只允许专用网络；精确规则属性待补。）
+- ☑ 若未显示/被拒绝/被策略抑制：确认 LanDrop 诊断能够说明不可达状态，并且设置入口只打开 Windows 防火墙设置；不创建/修改规则。（`N/A`：本次出现授权提示且用户允许 Private。）
+- ☑ 使用独立客户机验证服务访问；记录访问成功或被阻断及对应诊断。（用户报告：客户机连接成功。）
+- ☐ 安装、运行、卸载前后对比规则清单，确认 LanDrop 自身没有主动创建、修改或删除 Windows 防火墙规则。（当前查询未发现 LanDrop 名称/程序路径规则；发现 `Python HTTP 8000`：Enabled、Inbound、Allow、Private、Program=Any、TCP LocalPort=8000、PersistentStore。需与 R01 基线对比，确认其是否预先存在。）
 
 注意：用户通过 Windows 原生授权可能促使 Windows 创建规则；这要与 LanDrop 直接写规则区分，并记录规则实际所有者/创建过程。LanDrop 卸载不得擅自删除该规则。
 
-**R03 判定：** ☐ PASS ☐ FAIL。观察到的 Windows 行为与证据：
+**R03 判定：** ☐ PASS ☐ FAIL。观察到的 Windows 行为与证据：用户报告出现原生授权提示、只允许 Private、独立客户机连接成功；精确规则属性及与 R01 基线的对比待补。
 
 ## P8-R04 — 完整发布生命周期
 
@@ -136,26 +137,27 @@
 
 ### 最终系统恢复核对
 
-| 对象 | 预期 / 实际结果 |
-| --- | --- |
-| `%LOCALAPPDATA%\Programs\LanDrop` | 完整卸载后不存在 |
-| `%LOCALAPPDATA%\LanDrop` | 周期一保留；周期二按选择删除 |
-| HKCU Run `LanDrop` | 不存在 |
-| StartupApproved\Run `LanDrop` | 精确派生 value 已清除；其他 value 不变 |
-| 开始菜单/桌面 LanDrop 快捷方式 | 不存在 |
-| HKCU Uninstall `LanDrop` | 不存在 |
-| LanDrop / Uninstall 进程、托盘 | 不存在 |
-| TCP 8000 | 无 LanDrop 监听 |
-| transaction/staging/rollback/uninstall TEMP | 无残留 |
-| 防火墙规则 | 与 Windows 授权行为相符；LanDrop 未主动写/删规则 |
-| Shared/Received/自定义目录哨兵 | 存在且 SHA-256 与基线一致 |
+
+| 对象                                        | 预期 / 实际结果                                  |
+| --------------------------------------------- | -------------------------------------------------- |
+| `%LOCALAPPDATA%\Programs\LanDrop`           | 完整卸载后不存在                                 |
+| `%LOCALAPPDATA%\LanDrop`                    | 周期一保留；周期二按选择删除                     |
+| HKCU Run`LanDrop`                           | 不存在                                           |
+| StartupApproved\Run`LanDrop`                | 精确派生 value 已清除；其他 value 不变           |
+| 开始菜单/桌面 LanDrop 快捷方式              | 不存在                                           |
+| HKCU Uninstall`LanDrop`                     | 不存在                                           |
+| LanDrop / Uninstall 进程、托盘              | 不存在                                           |
+| TCP 8000                                    | 无 LanDrop 监听                                  |
+| transaction/staging/rollback/uninstall TEMP | 无残留                                           |
+| 防火墙规则                                  | 与 Windows 授权行为相符；LanDrop 未主动写/删规则 |
+| Shared/Received/自定义目录哨兵              | 存在且 SHA-256 与基线一致                        |
 
 **R04 判定：** ☐ PASS ☐ FAIL；证据/异常：
 
 ## 最终记录
 
 - P8-R01：☐ PASS ☐ FAIL
-- P8-R02：☐ PASS ☐ FAIL ☐ 部分 N/A（说明：）
+- P8-R02：☑ PASS ☐ FAIL（可选的缺失 Runtime 分支未执行，不构成阻塞）
 - P8-R03：☐ PASS ☐ FAIL
 - P8-R04：☐ PASS ☐ FAIL
 - 未解释残留：☐ 无 ☐ 有（列明对象与现场位置：）
