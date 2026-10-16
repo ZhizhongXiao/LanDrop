@@ -309,7 +309,7 @@ class DesktopApi:
             return {"ok": False, "error": f"无法打开日志文件夹：{exc}"}
         return {"ok": True}
 
-    def open_transfer_directory(self, target: str) -> dict[str, object]:
+    def open_transfer_directory(self, target: object) -> dict[str, object]:
         targets = {
             "shared": ("共享目录", "shared_directory"),
             "received": ("接收目录", "receive_directory"),

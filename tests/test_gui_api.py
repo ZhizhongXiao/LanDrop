@@ -10,7 +10,7 @@ from landrop.coordinator import ActionResult
 from landrop.gui import DesktopApi
 from landrop.service import ServiceController, ServiceSnapshot
 from landrop.settings import AppSettings, SettingsStore
-from landrop.trust import CredentialStore
+from landrop.trust import CredentialStore, TrustedClient
 from tests.support import temporary_directory
 
 
@@ -71,7 +71,7 @@ class DesktopTrustApiTests(unittest.TestCase):
                 return trusted_count
 
             self.assertEqual(count(), 0)
-            clients = []
+            clients: list[TrustedClient] = []
             for expected_count in (1, 2, 3, 3):
                 client, _credential = store.issue("Same Browser User-Agent")
                 clients.append(client)
