@@ -87,6 +87,10 @@
             <button id="start" class="button primary" type="button">启动服务</button>
             <button id="stop" class="button danger" type="button" disabled>停止服务</button>
             <button id="resetDeadline" class="button secondary" type="button" disabled>重置为 5 分钟</button>
+            <div class="directory-actions" role="group" aria-label="打开收发目录">
+              <button id="openSharedDirectory" class="button secondary" type="button">打开共享目录</button>
+              <button id="openReceivedDirectory" class="button secondary" type="button">打开接收目录</button>
+            </div>
           </div>
           <div id="notice" class="notice" aria-live="polite"></div>
         </section>
@@ -102,7 +106,7 @@
             <button id="openTransferSettingsCard" class="button secondary" type="button">进入设置</button>
           </section>
           <section class="panel overview-card">
-            <div class="overview-card-copy"><p class="section-index">TRUSTED CLIENTS</p><h2>可信客户机</h2><p>查看已配对浏览器，并在需要时撤销信任。</p><div class="overview-card-metrics"><span><strong id="paired">0</strong>可信客户机</span><span><strong id="active">0</strong>活动请求流</span></div></div>
+            <div class="overview-card-copy"><p class="section-index">TRUSTED CLIENTS</p><h2>可信客户机</h2><p>查看有效授权浏览器，并在需要时撤销信任。</p><div class="overview-card-metrics"><span title="按当前有效授权凭据统计；重复配对不会重复计数。"><strong id="trustedClientCount">—</strong>有效授权浏览器</span><span><strong id="active">0</strong>活动请求流</span></div></div>
             <button id="openTrustedClients" class="button secondary" type="button">管理</button>
           </section>
         </div>

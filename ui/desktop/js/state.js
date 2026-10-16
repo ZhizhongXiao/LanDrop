@@ -170,7 +170,10 @@ function render(state) {
   countdownTarget = performance.now() + Math.max(0, Number(milliseconds || 0));
   tickCountdown();
 
-  $("paired").textContent = String(state.paired_devices || 0);
+  const trustedClientCount = state.trusted_client_count;
+  $("trustedClientCount").textContent = Number.isInteger(trustedClientCount) && trustedClientCount >= 0
+    ? String(trustedClientCount)
+    : "—";
   $("active").textContent = String(state.active_transfers || 0);
   const stats = state.statistics || {};
   $("downloadStatistics").textContent = `${stats.completed_downloads || 0} 成功 / ${stats.failed_downloads || 0} 失败；${Number(stats.downloaded_mb || 0).toFixed(2)} MB`;

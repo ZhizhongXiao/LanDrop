@@ -175,6 +175,10 @@ class DesktopApi:
         state = snapshot.to_dict()
         qr_provider = getattr(self._controller, "pairing_qr_data_uri", None)
         state["pairing_qr_data_uri"] = qr_provider() if callable(qr_provider) else ""
+        try:
+            state["trusted_client_count"] = len(self._credentials.list_clients())
+        except RuntimeError:
+            state["trusted_client_count"] = None
         return state
 
     def choose_directory(self, current: str) -> dict[str, object]:
@@ -303,6 +307,34 @@ class DesktopApi:
             os.startfile(str(log_directory))  # type: ignore[attr-defined]
         except (OSError, AttributeError) as exc:
             return {"ok": False, "error": f"无法打开日志文件夹：{exc}"}
+        return {"ok": True}
+
+    def open_transfer_directory(self, target: str) -> dict[str, object]:
+        targets = {
+            "shared": ("共享目录", "shared_directory"),
+            "received": ("接收目录", "receive_directory"),
+        }
+        selection = targets.get(target) if isinstance(target, str) else None
+        if selection is None:
+            return {"ok": False, "error": "未知的收发目录入口。"}
+
+        label, attribute = selection
+        snapshot = self._controller.snapshot()
+        configured_directory = (
+            getattr(snapshot, attribute)
+            if snapshot.running
+            else getattr(self._settings, attribute)
+        )
+        if not configured_directory:
+            return {"ok": False, "error": f"{label}尚未设置。"}
+
+        directory = Path(configured_directory)
+        if not directory.is_dir():
+            return {"ok": False, "error": f"{label}不存在或不可访问：{directory}"}
+        try:
+            os.startfile(str(directory))  # type: ignore[attr-defined]
+        except (OSError, AttributeError) as exc:
+            return {"ok": False, "error": f"无法打开{label}：{exc}"}
         return {"ok": True}
 
     def get_diagnostic_report(self) -> dict[str, object]:

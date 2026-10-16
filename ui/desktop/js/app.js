@@ -279,6 +279,21 @@ $("openQrDialog").addEventListener("click", () => {
 $("copyPairing").addEventListener("click", () => copySessionValue("pairing", "配对码已复制。"));
 $("copyLanUrl").addEventListener("click", () => copySessionValue("lanUrl", "客户机访问地址已复制。"));
 
+for (const [buttonId, target, label] of [
+  ["openSharedDirectory", "shared", "共享目录"],
+  ["openReceivedDirectory", "received", "接收目录"]
+]) {
+  $(buttonId).addEventListener("click", async () => {
+    try {
+      const result = await window.pywebview.api.open_transfer_directory(target);
+      if (result.ok) showInfo("已打开" + label + "。");
+      else showError(result.error || "无法打开" + label + "。");
+    } catch (error) {
+      showError("打开" + label + "失败：" + error);
+    }
+  });
+}
+
 $("qrDialog").addEventListener("click", event => {
   if (event.target === $("qrDialog")) $("qrDialog").close();
 });
