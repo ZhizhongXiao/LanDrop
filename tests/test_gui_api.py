@@ -119,6 +119,26 @@ class DesktopTrustApiTests(unittest.TestCase):
             self.assertEqual(state["trusted_client_count"], 0)
             self.assertEqual(store.list_clients(), [])
 
+    def test_get_state_counts_active_clients_when_expiry_cleanup_write_fails(self) -> None:
+        with temporary_directory() as temporary:
+            store = CredentialStore(Path(temporary) / "data")
+            expired, _expired_credential = store.issue("Expired Browser")
+            active, _active_credential = store.issue("Active Browser")
+            payload = json.loads(store.path.read_text(encoding="utf-8"))
+            payload["clients"][0]["expires_at"] = "2020-01-01T00:00:00+00:00"
+            store.path.write_text(json.dumps(payload), encoding="utf-8")
+            api = DesktopApi(ServiceController(store), store, object())
+
+            with (
+                patch.object(store, "_save", side_effect=OSError("read-only storage")),
+                self.assertLogs("landrop.trust", level="WARNING"),
+            ):
+                state = _object_dict(api.get_state()["state"])
+
+            self.assertEqual(state["trusted_client_count"], 1)
+            self.assertEqual([active.client_id], [client.client_id for client in store.list_clients()])
+            self.assertNotEqual(expired.client_id, active.client_id)
+
     def test_get_state_uses_none_when_trusted_store_cannot_be_read(self) -> None:
         with temporary_directory() as temporary:
             store = CredentialStore(Path(temporary) / "data")

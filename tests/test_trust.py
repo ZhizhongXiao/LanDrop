@@ -4,6 +4,7 @@ import json
 import unittest
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from unittest.mock import patch
 
 from support import temporary_directory
 
@@ -68,6 +69,34 @@ class CredentialStoreTests(unittest.TestCase):
             self.assertEqual(store.list_clients(), [])
             self.assertEqual(json.loads(store.path.read_text(encoding="utf-8"))["clients"], [])
             self.assertEqual(client.client_id, record["client_id"])
+
+    def test_expired_cleanup_write_failure_keeps_active_credentials_usable(self) -> None:
+        with temporary_directory() as temporary:
+            store = CredentialStore(Path(temporary))
+            expired_client, expired_credential = store.issue("Expired Browser")
+            active_client, active_credential = store.issue("Active Browser")
+            payload = json.loads(store.path.read_text(encoding="utf-8"))
+            payload["clients"][0]["expires_at"] = "2020-01-01T00:00:00+00:00"
+            store.path.write_text(json.dumps(payload), encoding="utf-8")
+
+            with patch.object(store, "_save", side_effect=OSError("read-only storage")) as save:
+                with self.assertLogs("landrop.trust", level="WARNING") as captured:
+                    clients = store.list_clients()
+                    self.assertEqual([active_client.client_id], [client.client_id for client in clients])
+                    verified = store.verify(active_credential)
+                    self.assertIsNotNone(verified)
+                    assert verified is not None
+                    self.assertEqual(verified.client_id, active_client.client_id)
+                    self.assertIsNone(store.verify(expired_credential))
+
+                self.assertEqual(save.call_count, 3)
+                self.assertEqual(len(captured.records), 1)
+
+            clients_after_recovery = store.list_clients()
+            self.assertEqual([active_client.client_id], [client.client_id for client in clients_after_recovery])
+            saved_records = json.loads(store.path.read_text(encoding="utf-8"))["clients"]
+            self.assertEqual([active_client.client_id], [record["client_id"] for record in saved_records])
+            self.assertNotEqual(expired_client.client_id, active_client.client_id)
 
     def test_legacy_record_expiry_is_derived_from_creation_time(self) -> None:
         with temporary_directory() as temporary:

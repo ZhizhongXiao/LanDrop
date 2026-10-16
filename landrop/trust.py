@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import re
 import secrets
@@ -15,6 +16,8 @@ from dataclasses import field as dataclass_field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import cast
+
+logger = logging.getLogger(__name__)
 
 MAX_TRUSTED_CLIENTS = 3
 CREDENTIAL_TTL = timedelta(days=5)
@@ -60,6 +63,7 @@ class CredentialStore:
         self.data_directory = data_directory
         self.path = data_directory / "credentials.json"
         self._lock = threading.RLock()
+        self._cleanup_failure_logged = False
 
     def issue(
         self,
@@ -161,7 +165,20 @@ class CredentialStore:
             and now < expires_at
         ]
         if len(active) != len(records):
-            self._save(active)
+            try:
+                self._save(active)
+            except OSError as exc:
+                if not self._cleanup_failure_logged:
+                    logger.warning(
+                        "Unable to persist expired trusted-client cleanup; "
+                        "continuing with active records in memory and retrying later: %s",
+                        exc,
+                    )
+                    self._cleanup_failure_logged = True
+            else:
+                self._cleanup_failure_logged = False
+        else:
+            self._cleanup_failure_logged = False
         return active
 
     def revoke(self, client_id: str) -> bool:
