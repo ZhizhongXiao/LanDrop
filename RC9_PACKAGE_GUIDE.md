@@ -1,6 +1,6 @@
 # LanDrop 0.6.0 RC9 验收包说明
 
-此包包含冻结的 LanDrop `0.6.0-rc9` 候选及 Phase 8F 清单。RC9 的 Phase 8F 尚待 R01～R04 实机验收；RC8 验收结果不能替代 RC9。
+此包是历史 RC9 候选，已由 RC10 取代，未进行 Phase 8F 验收。不要用此包完成当前验收；请使用 `RC10_PACKAGE_GUIDE.md`。
 
 ## 使用哪个文件
 
