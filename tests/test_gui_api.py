@@ -1,14 +1,15 @@
 from __future__ import annotations
 
+import json
 import unittest
 from pathlib import Path
 from typing import TypeGuard
-from unittest.mock import patch
+from unittest.mock import call, patch
 
 from landrop.coordinator import ActionResult
 from landrop.gui import DesktopApi
 from landrop.service import ServiceController, ServiceSnapshot
-from landrop.settings import SettingsStore
+from landrop.settings import AppSettings, SettingsStore
 from landrop.trust import CredentialStore
 from tests.support import temporary_directory
 
@@ -22,6 +23,14 @@ class _ControllerStub:
 
     def refresh_diagnostics(self) -> ServiceSnapshot:
         raise NotImplementedError
+
+
+class _SnapshotController(_ControllerStub):
+    def __init__(self, snapshot: ServiceSnapshot) -> None:
+        self.current_snapshot = snapshot
+
+    def snapshot(self) -> ServiceSnapshot:
+        return self.current_snapshot
 
 
 def _is_object_dict(value: object) -> TypeGuard[dict[str, object]]:
@@ -45,6 +54,174 @@ def _object_dicts(value: object) -> list[dict[str, object]]:
 
 
 class DesktopTrustApiTests(unittest.TestCase):
+    def test_get_state_counts_active_authorizations_across_issue_and_revoke(self) -> None:
+        with temporary_directory() as temporary:
+            store = CredentialStore(Path(temporary) / "data")
+            api = DesktopApi(ServiceController(store), store, object())
+
+            def count() -> object:
+                state = _object_dict(api.get_state()["state"])
+                trusted_count = state["trusted_client_count"]
+                listed = api.list_trusted_clients()
+                self.assertTrue(listed["ok"])
+                self.assertEqual(
+                    trusted_count,
+                    len(_object_dicts(listed["clients"])),
+                )
+                return trusted_count
+
+            self.assertEqual(count(), 0)
+            clients = []
+            for expected_count in (1, 2, 3, 3):
+                client, _credential = store.issue("Same Browser User-Agent")
+                clients.append(client)
+                self.assertEqual(count(), expected_count)
+
+            active_ids = {client.client_id for client in store.list_clients()}
+            self.assertNotIn(clients[0].client_id, active_ids)
+            self.assertEqual(
+                active_ids,
+                {client.client_id for client in clients[1:]},
+            )
+
+            revoked = api.revoke_trusted_client(clients[1].client_id)
+            self.assertTrue(revoked["revoked"])
+            self.assertEqual(count(), 2)
+
+            all_revoked = api.revoke_all_trusted_clients()
+            self.assertEqual(all_revoked["count"], 2)
+            self.assertEqual(count(), 0)
+
+    def test_get_state_counts_separate_records_for_the_same_user_agent(self) -> None:
+        with temporary_directory() as temporary:
+            store = CredentialStore(Path(temporary) / "data")
+            api = DesktopApi(ServiceController(store), store, object())
+            user_agent = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X)"
+
+            first, _first_credential = store.issue(user_agent)
+            second, _second_credential = store.issue(user_agent)
+
+            self.assertNotEqual(first.client_id, second.client_id)
+            state = _object_dict(api.get_state()["state"])
+            self.assertEqual(state["trusted_client_count"], 2)
+
+    def test_get_state_excludes_expired_trusted_records(self) -> None:
+        with temporary_directory() as temporary:
+            store = CredentialStore(Path(temporary) / "data")
+            store.issue("Expired Browser")
+            payload = json.loads(store.path.read_text(encoding="utf-8"))
+            payload["clients"][0]["expires_at"] = "2020-01-01T00:00:00+00:00"
+            store.path.write_text(json.dumps(payload), encoding="utf-8")
+            api = DesktopApi(ServiceController(store), store, object())
+
+            state = _object_dict(api.get_state()["state"])
+
+            self.assertEqual(state["trusted_client_count"], 0)
+            self.assertEqual(store.list_clients(), [])
+
+    def test_get_state_uses_none_when_trusted_store_cannot_be_read(self) -> None:
+        with temporary_directory() as temporary:
+            store = CredentialStore(Path(temporary) / "data")
+            store.issue("Unreadable Browser")
+            store.path.write_text("{invalid json", encoding="utf-8")
+            api = DesktopApi(ServiceController(store), store, object())
+
+            state = _object_dict(api.get_state()["state"])
+
+            self.assertIsNone(state["trusted_client_count"])
+
+    def test_open_transfer_directories_uses_saved_settings_when_stopped(self) -> None:
+        with temporary_directory() as temporary:
+            root = Path(temporary)
+            shared = root / "saved-shared"
+            received = root / "saved-received"
+            shared.mkdir()
+            received.mkdir()
+            store = CredentialStore(root / "data")
+            settings = SettingsStore(root / "data", downloads=root / "Downloads")
+            settings.save(AppSettings(shared, received, 100))
+            snapshot = ServiceSnapshot(
+                running=False,
+                phase="stopped",
+                message="服务未启动",
+                shared_directory=str(root / "stale-shared"),
+                receive_directory=str(root / "stale-received"),
+                max_upload_mb=100,
+            )
+            api = DesktopApi(_SnapshotController(snapshot), store, object(), settings)
+
+            with patch("landrop.gui.os.startfile", create=True) as startfile:
+                shared_result = api.open_transfer_directory("shared")
+                received_result = api.open_transfer_directory("received")
+
+            self.assertTrue(shared_result["ok"])
+            self.assertTrue(received_result["ok"])
+            self.assertEqual(
+                startfile.call_args_list,
+                [call(str(shared)), call(str(received))],
+            )
+
+    def test_open_transfer_directories_uses_running_snapshot_paths(self) -> None:
+        with temporary_directory() as temporary:
+            root = Path(temporary)
+            saved_shared = root / "saved-shared"
+            saved_received = root / "saved-received"
+            frozen_shared = root / "frozen-shared"
+            frozen_received = root / "frozen-received"
+            for directory in (saved_shared, saved_received, frozen_shared, frozen_received):
+                directory.mkdir()
+            store = CredentialStore(root / "data")
+            settings = SettingsStore(root / "data", downloads=root / "Downloads")
+            settings.save(AppSettings(saved_shared, saved_received, 100))
+            snapshot = ServiceSnapshot(
+                running=True,
+                phase="running",
+                message="服务正在运行",
+                shared_directory=str(frozen_shared),
+                receive_directory=str(frozen_received),
+                max_upload_mb=100,
+            )
+            api = DesktopApi(_SnapshotController(snapshot), store, object(), settings)
+
+            with patch("landrop.gui.os.startfile", create=True) as startfile:
+                shared_result = api.open_transfer_directory("shared")
+                received_result = api.open_transfer_directory("received")
+
+            self.assertTrue(shared_result["ok"])
+            self.assertTrue(received_result["ok"])
+            self.assertEqual(
+                startfile.call_args_list,
+                [call(str(frozen_shared)), call(str(frozen_received))],
+            )
+
+    def test_open_transfer_directory_rejects_invalid_target_and_missing_path(self) -> None:
+        with temporary_directory() as temporary:
+            root = Path(temporary)
+            missing_shared = root / "missing-shared"
+            received = root / "received"
+            received.mkdir()
+            store = CredentialStore(root / "data")
+            settings = SettingsStore(root / "data", downloads=root / "Downloads")
+            settings.save(AppSettings(missing_shared, received, 100))
+            snapshot = ServiceSnapshot(
+                running=False,
+                phase="stopped",
+                message="服务未启动",
+                shared_directory="",
+                receive_directory="",
+                max_upload_mb=100,
+            )
+            api = DesktopApi(_SnapshotController(snapshot), store, object(), settings)
+
+            with patch("landrop.gui.os.startfile", create=True) as startfile:
+                invalid = api.open_transfer_directory("command")
+                missing = api.open_transfer_directory("shared")
+
+            self.assertFalse(invalid["ok"])
+            self.assertFalse(missing["ok"])
+            self.assertIn("不存在或不可访问", str(missing["error"]))
+            startfile.assert_not_called()
+
     def test_successful_start_persists_only_validated_user_settings(self) -> None:
         with temporary_directory() as temporary:
             root = Path(temporary)
