@@ -3,11 +3,34 @@
 const executionTitle = document.getElementById("executionTitle");
 const executionMessage = document.getElementById("executionMessage");
 const executionResiduals = document.getElementById("executionResiduals");
+const firewallCleanup = document.getElementById("firewallCleanup");
+const openFirewallAllowedApps = document.getElementById("openFirewallAllowedApps");
+const firewallOpenStatus = document.getElementById("firewallOpenStatus");
 const next = document.getElementById("next");
 let executionPoll = null;
 
 async function closeExecutionWindow() {
   await window.pywebview.api.close_window();
+}
+
+async function openAllowedAppsPage() {
+  openFirewallAllowedApps.disabled = true;
+  firewallOpenStatus.textContent = "";
+  firewallOpenStatus.classList.remove("error");
+  try {
+    const result = await window.pywebview.api.open_firewall_allowed_apps();
+    if (!result.ok) {
+      firewallOpenStatus.textContent = result.error || "无法打开 Windows 防火墙页面。";
+      firewallOpenStatus.classList.add("error");
+      return;
+    }
+    firewallOpenStatus.textContent = "已打开页面。";
+  } catch (error) {
+    firewallOpenStatus.textContent = error instanceof Error ? error.message : "无法打开 Windows 防火墙页面。";
+    firewallOpenStatus.classList.add("error");
+  } finally {
+    openFirewallAllowedApps.disabled = false;
+  }
 }
 
 function showExecutionFailure(message) {
@@ -28,6 +51,9 @@ async function pollExecution() {
     return;
   }
   const outcome = status.outcome || {};
+  if (outcome.complete || outcome.finalization_pending) {
+    firewallCleanup.hidden = false;
+  }
   executionTitle.textContent = outcome.finalization_pending
     ? "等待最终清理"
     : (outcome.complete ? "卸载完成" : "卸载未完全完成");
@@ -42,6 +68,8 @@ async function pollExecution() {
   next.textContent = outcome.finalization_pending ? "关闭并完成清理" : "关闭";
   next.onclick = closeExecutionWindow;
 }
+
+openFirewallAllowedApps.addEventListener("click", openAllowedAppsPage);
 
 window.addEventListener("pywebviewready", async () => {
   const context = await window.pywebview.api.get_context();

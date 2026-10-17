@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>卸载 LanDrop · 界面预览</title>
+  <link rel="stylesheet" href="../ui/desktop/css/tokens.css">
+  <link rel="stylesheet" href="../ui/wizard/css/wizard.css">
+  <link rel="stylesheet" href="../ui/uninstall/css/uninstall.css">
+</head>
+<body>
+  <main class="wizard-shell">
+    <aside class="wizard-rail">
+      <div class="wizard-brand">
+        <span class="wizard-brand-icon"><img src="../assets/LanDrop-icon-preview.png" alt=""></span>
+        <span class="wizard-brand-copy"><strong>LanDrop</strong><span>卸载向导</span></span>
+      </div>
+      <ol class="wizard-steps" aria-label="卸载执行阶段">
+        <li class="wizard-step active"><b>4</b><span>执行清理</span></li>
+      </ol>
+      <p class="rail-note">正在按已确认的范围清理程序和应用数据；收发文件始终保留。</p>
+    </aside>
+    <section class="wizard-main">
+      <div class="wizard-content">
+        <section class="wizard-page active execution-panel">
+          <p class="wizard-kicker">UNINSTALLING</p>
+          <h1>等待最终清理</h1>
+          <p class="wizard-lead">LanDrop 程序与所选数据已移除。关闭此窗口后将完成临时卸载文件清理。</p>
+          <section class="firewall-card" aria-labelledby="firewallCleanupTitle">
+            <div class="firewall-card-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" fill="none" focusable="false">
+                <path d="M12 3.5 19 6v5.2c0 4.4-2.8 7.6-7 9.3-4.2-1.7-7-4.9-7-9.3V6l7-2.5Z" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round" />
+                <path d="M12 8v4.5m0 3h.01" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" />
+              </svg>
+            </div>
+            <div class="firewall-card-content">
+              <div class="firewall-card-heading">
+                <h2 id="firewallCleanupTitle">Windows 防火墙允许项仍保留</h2>
+                <span>可选清理</span>
+              </div>
+              <p>如果不再使用 LanDrop，可在“允许的应用”中移除对应项。打开页面后点击“更改设置”，选中 LanDrop 项并点击“删除”。</p>
+              <div class="firewall-cleanup-actions">
+                <span id="firewallOpenStatus" role="status" aria-live="polite">已打开页面。</span>
+                <button id="openFirewallAllowedApps" class="wizard-button" type="button">打开“允许的应用”</button>
+              </div>
+            </div>
+          </section>
+        </section>
+      </div>
+      <footer class="wizard-footer">
+        <span class="wizard-version">LanDrop Uninstall</span>
+        <div class="footer-actions"><button class="wizard-button primary" type="button">关闭并完成清理</button></div>
+      </footer>
+    </section>
+  </main>
+  <script>
+    document.getElementById("openFirewallAllowedApps").addEventListener("click", () => {
+      document.getElementById("firewallOpenStatus").textContent = "演示页面不会更改 Windows 设置。";
+    });
+  </script>
+</body>
+</html>

@@ -6,6 +6,7 @@ import argparse
 import ctypes
 import logging
 import os
+import subprocess
 import sys
 import threading
 from collections.abc import Callable
@@ -223,6 +224,38 @@ class UninstallApi:
             if self._operation is None:
                 return {"ok": True, "phase": "idle", "outcome": None}
             return {"ok": True, **self._operation}
+
+    def open_firewall_allowed_apps(self) -> dict[str, object]:
+        if not self.temporary_mode:
+            return {"ok": False, "error": "防火墙允许应用入口仅在卸载完成后可用。"}
+        with self._state_lock:
+            operation = self._operation
+            outcome = operation.get("outcome") if operation is not None else None
+            can_open = (
+                operation is not None
+                and operation["phase"] == "finished"
+                and isinstance(outcome, dict)
+                and (outcome.get("complete") or outcome.get("finalization_pending"))
+            )
+        if not can_open:
+            return {"ok": False, "error": "请等待卸载成功完成后再打开防火墙允许应用页面。"}
+
+        control_exe = Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32" / "control.exe"
+        try:
+            subprocess.Popen(
+                [
+                    str(control_exe),
+                    "/name",
+                    "Microsoft.WindowsFirewall",
+                    "/page",
+                    "pageConfigureApps",
+                ],
+                close_fds=True,
+            )
+        except OSError as exc:
+            logger.warning("Failed to open Windows Firewall allowed apps", exc_info=True)
+            return {"ok": False, "error": f"无法打开 Windows 防火墙的允许应用页面：{exc}"}
+        return {"ok": True}
 
     def close_window(self) -> dict[str, object]:
         with self._state_lock:

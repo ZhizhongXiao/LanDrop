@@ -20,10 +20,29 @@
     </aside>
     <section class="wizard-main">
       <div class="wizard-content">
-        <section class="execution-panel">
+        <section class="wizard-page active execution-panel">
           <p class="wizard-kicker">UNINSTALLING</p><h1 id="executionTitle">正在卸载 LanDrop</h1>
           <p id="executionMessage" class="wizard-lead">正在验证卸载请求和当前安装状态…</p>
           <div id="executionResiduals" class="preview-note" hidden></div>
+          <section id="firewallCleanup" class="firewall-card" aria-labelledby="firewallCleanupTitle" hidden>
+            <div class="firewall-card-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" fill="none" focusable="false">
+                <path d="M12 3.5 19 6v5.2c0 4.4-2.8 7.6-7 9.3-4.2-1.7-7-4.9-7-9.3V6l7-2.5Z" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round" />
+                <path d="M12 8v4.5m0 3h.01" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" />
+              </svg>
+            </div>
+            <div class="firewall-card-content">
+              <div class="firewall-card-heading">
+                <h2 id="firewallCleanupTitle">Windows 防火墙允许项仍保留</h2>
+                <span>可选清理</span>
+              </div>
+              <p>如果不再使用 LanDrop，可在“允许的应用”中移除对应项。打开页面后点击“更改设置”，选中 LanDrop 项并点击“删除”。</p>
+              <div class="firewall-cleanup-actions">
+                <span id="firewallOpenStatus" role="status" aria-live="polite"></span>
+                <button id="openFirewallAllowedApps" class="wizard-button" type="button">打开“允许的应用”</button>
+              </div>
+            </div>
+          </section>
         </section>
       </div>
       <footer class="wizard-footer"><span id="uninstallVersion" class="wizard-version">LanDrop Uninstall</span><div class="footer-actions"><button id="next" class="wizard-button primary" type="button" disabled>正在卸载…</button></div></footer>

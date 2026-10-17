@@ -44,12 +44,19 @@ class _ClosingEvent(Protocol):
     def __iadd__(self, handler: Callable[[], bool]) -> Self: ...
 
 
+class _ReadyEvent(Protocol):
+    def wait(self, timeout: float | None = None) -> bool: ...
+
+
 class _WindowEvents(Protocol):
     closing: _ClosingEvent
+    shown: _ReadyEvent
 
 
 class _DesktopWindow(Protocol):
     events: _WindowEvents
+    focus: bool
+    native: object | None
 
     def create_file_dialog(
         self,
@@ -384,18 +391,122 @@ class DesktopApi:
             return {"ok": False, "error": str(exc), "clients": []}
 
 
+_GWL_EXSTYLE = -20
+_WS_EX_NOACTIVATE = 0x08000000
+_SWP_NOSIZE = 0x0001
+_SWP_NOMOVE = 0x0002
+_SWP_NOZORDER = 0x0004
+_SWP_NOACTIVATE = 0x0010
+_SWP_FRAMECHANGED = 0x0020
+
+
+def _clear_window_noactivate_style(
+    handle: int,
+    *,
+    get_extended_style: Callable[[int, int], int] | None = None,
+    set_extended_style: Callable[[int, int, int], int] | None = None,
+    set_window_pos: Callable[[int, int, int, int, int, int, int], int] | None = None,
+) -> None:
+    """Clear only WS_EX_NOACTIVATE while preserving the window's other styles."""
+    uses_win32 = (
+        get_extended_style is None
+        and set_extended_style is None
+        and set_window_pos is None
+    )
+    if uses_win32:
+        user32 = ctypes.windll.user32  # type: ignore[attr-defined]
+        get_extended_style = user32.GetWindowLongW
+        set_extended_style = user32.SetWindowLongW
+        set_window_pos = user32.SetWindowPos
+    elif (
+        get_extended_style is None
+        or set_extended_style is None
+        or set_window_pos is None
+    ):
+        raise ValueError(
+            "GetWindowLongW、SetWindowLongW 与 SetWindowPos 必须同时提供。"
+        )
+
+    assert get_extended_style is not None
+    assert set_extended_style is not None
+    assert set_window_pos is not None
+
+    if uses_win32:
+        ctypes.set_last_error(0)
+    style = int(get_extended_style(handle, _GWL_EXSTYLE))
+    if uses_win32:
+        error = ctypes.get_last_error()
+        if style == 0 and error:
+            raise OSError(error, "读取 LanDrop 窗口扩展样式失败。")
+
+    updated_style = style & ~_WS_EX_NOACTIVATE
+    if updated_style != style:
+        if uses_win32:
+            ctypes.set_last_error(0)
+        previous_style = int(set_extended_style(handle, _GWL_EXSTYLE, updated_style))
+        if uses_win32:
+            error = ctypes.get_last_error()
+            if previous_style == 0 and error:
+                raise OSError(error, "更新 LanDrop 窗口扩展样式失败。")
+
+    if uses_win32:
+        ctypes.set_last_error(0)
+    position_updated = set_window_pos(
+        handle,
+        0,
+        0,
+        0,
+        0,
+        0,
+        _SWP_NOSIZE
+        | _SWP_NOMOVE
+        | _SWP_NOZORDER
+        | _SWP_NOACTIVATE
+        | _SWP_FRAMECHANGED,
+    )
+    if not position_updated:
+        error = ctypes.get_last_error() if uses_win32 else 0
+        raise OSError(error, "应用 LanDrop 窗口扩展样式失败。")
+
+
+def _invoke_winforms_thread(native: object, action: Callable[[], None]) -> None:
+    """Synchronously invoke an action on the native WinForms UI thread."""
+    from System import Func, Type  # type: ignore[import-not-found]
+
+    cast(Any, native).Invoke(Func[Type](action))
+
+
 class _WindowDispatcher:
     """Centralize every pywebview window mutation away from callback threads."""
 
-    def __init__(self, window: _DesktopWindow) -> None:
+    def __init__(self, window: _DesktopWindow, *, startup_hidden: bool = False) -> None:
         self._window = window
+        self._startup_activation_pending = startup_hidden
 
     def hide_window(self) -> None:
         self._window.hide()
 
     def show_window(self) -> None:
+        if self._startup_activation_pending:
+            self._enable_startup_window_activation()
+            self._startup_activation_pending = False
         self._window.show()
         self._window.restore()
+
+    def _enable_startup_window_activation(self) -> None:
+        if not self._window.events.shown.wait(20):
+            raise RuntimeError("LanDrop 主窗口尚未完成初始化，无法启用鼠标激活。")
+
+        native = self._window.native
+        if native is None:
+            raise RuntimeError("LanDrop 主窗口的 Windows 窗口句柄尚未准备好。")
+
+        def enable_activation() -> None:
+            handle = int(native.Handle.ToInt32())  # type: ignore[attr-defined]
+            _clear_window_noactivate_style(handle)
+            self._window.focus = True
+
+        _invoke_winforms_thread(native, enable_activation)
 
     def destroy_window(self) -> None:
         self._window.destroy()
@@ -527,7 +638,7 @@ def main(argv: list[str] | None = None) -> int:
     if window is None:
         raise RuntimeError("pywebview 未能创建 LanDrop 主窗口。")
     api.attach_window(window)
-    window_dispatcher = _WindowDispatcher(window)
+    window_dispatcher = _WindowDispatcher(window, startup_hidden=args.startup)
     coordinator = ActionCoordinator(controller, window_dispatcher)
     api.attach_coordinator(coordinator)
     single_instance.set_activate_callback(coordinator.submit_show_window)

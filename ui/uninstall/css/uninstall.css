@@ -1,13 +1,119 @@
 .execution-panel {
-  min-height: 360px;
-  padding: 12px 4px;
-}
-
-.execution-panel[hidden] {
-  display: none;
+  min-width: 0;
 }
 
 .preview-note.error {
   border-color: color-mix(in srgb, var(--danger, #d94a4a) 52%, transparent);
   color: var(--danger, #b3261e);
+}
+
+.firewall-card {
+  display: grid;
+  grid-template-columns: 42px minmax(0, 1fr);
+  align-items: start;
+  gap: 14px;
+  max-width: 760px;
+  margin-top: 18px;
+  padding: 18px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  color: var(--text-secondary);
+  background: var(--surface-soft);
+  box-shadow: var(--shadow-soft);
+}
+
+.firewall-card[hidden] {
+  display: none;
+}
+
+.firewall-card-icon {
+  display: grid;
+  place-items: center;
+  width: 42px;
+  height: 42px;
+  border-radius: 12px;
+  color: var(--warning);
+  background: var(--warning-soft);
+}
+
+.firewall-card-icon svg {
+  width: 23px;
+  height: 23px;
+}
+
+.firewall-card-content {
+  min-width: 0;
+}
+
+.firewall-card-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.firewall-card-heading h2 {
+  margin: 1px 0 0;
+  color: var(--text);
+  font-size: 16px;
+  letter-spacing: -.02em;
+}
+
+.firewall-card-heading span {
+  flex: 0 0 auto;
+  padding: 3px 9px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--muted);
+  background: var(--surface-raised);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.firewall-card p {
+  margin: 7px 0 13px;
+  font-size: 13px;
+  line-height: 1.65;
+}
+
+.firewall-cleanup-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.firewall-cleanup-actions .wizard-button {
+  min-width: 0;
+  margin-left: auto;
+  padding: 8px 13px;
+}
+
+.firewall-cleanup-actions span {
+  min-width: 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.firewall-cleanup-actions .error {
+  color: var(--danger);
+}
+
+@media (max-width: 680px) {
+  .firewall-card {
+    grid-template-columns: 36px minmax(0, 1fr);
+    gap: 11px;
+    padding: 14px;
+  }
+
+  .firewall-card-icon {
+    width: 36px;
+    height: 36px;
+  }
+
+  .firewall-card-heading {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 5px;
+  }
 }
