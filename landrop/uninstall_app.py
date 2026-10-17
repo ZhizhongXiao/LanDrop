@@ -245,7 +245,7 @@ class UninstallApi:
         if not can_open:
             return {"ok": False, "error": "请等待卸载成功完成后再打开防火墙允许应用页面。"}
 
-        control_exe = Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32" / "control.exe"
+        control_exe = Path(os.environ.get("SYSTEMROOT", r"C:\Windows")) / "System32" / "control.exe"
         try:
             subprocess.Popen(
                 [
