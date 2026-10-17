@@ -1,12 +1,12 @@
 # 第八阶段详细计划：安装器、卸载器与分发
 
-状态：**Phase 8A～8E 开发实现、自动化回归和本机真实安装生命周期开发验收通过；RC1～RC8 已被后续候选取代，RC8 Phase 8F 本机验收已完成；RC9 已从运行时代码提交 `4dff80a` 构建并冻结，Build ID 为 `0.6.0-4dff80a-20261016111954`，206/206 全量回归及静态检查通过；RC9 Phase 8F R01～R04 尚待验收（2026-10-16）**。
+状态：**Phase 8A～8E 开发实现、自动化回归和本机真实安装生命周期开发验收通过；RC1～RC10 均已被后续候选取代，RC8 Phase 8F 本机验收已完成；当前唯一候选为 RC11，运行时代码提交 `99628ea`，Build ID `0.6.0-99628ea-20261017050753`，212/212 全量回归、compileall、Ruff、strict Pyright 和候选产物校验通过；RC11 Phase 8F R01～R04 实机验收待执行（2026-10-17）**。RC10 冻结记录保留作历史，不得用于 RC11 验收。
 
 资源边界更新（2026-09-28）：LAN 与 loopback 共用最多 16 个 HTTP worker slot，accepted socket 单次 I/O 空闲超时 30 秒；`/upload` 和 `/upload/raw` 共用最多 2 个并发上传 slot，第三个请求立即返回 HTTP 429 与 `Retry-After: 2`；进程内空间 reservation 从实际空闲空间中扣除已承诺上传字节，并只保留一次 10 MiB 安全余量，所有成功、失败和异常路径均释放。multipart 在取得 slot 与空间 reservation 前不读取 forms/files。实现保留 Bottle/wsgiref，不改变协议、Range、SessionLifecycle、5 分钟 session 或 60 秒 grace。它限制无界资源增长，但持续恶意连接仍可占满 16 个 slot 并暂时导致拒绝服务；不宣称为通用 DoS 防护。完整回归共 198 项通过。
 
 RC6 已于最终发布验收前被 RC7 取代，RC7 又因冻结后的 UI 行为更新被 RC8 取代；历史构建记录分别保留在 `docs/releases/0.6.0-rc6.md` 与 `docs/releases/0.6.0-rc7.md`，不得用于 Phase 8F。
 
-RC8 冻结记录：详见 `docs/releases/0.6.0-rc8.md`，本机 Phase 8F 验收证据已归档。RC9 冻结记录：详见 `docs/releases/0.6.0-rc9.md`；运行时代码锚点为 `4dff80a`，Build ID 为 `0.6.0-4dff80a-20261016111954`，候选目录为 `C:\Project\LanDrop\dist\0.6.0-rc9-4dff80a`。RC9 增加桌面收发目录入口、控件对齐及准确的可信授权记录统计文案；完整自动回归 206/206 通过，compileall、Ruff、strict Pyright 通过，Setup / Uninstall / 主程序自检和 payload manifest 校验通过。RC9 Phase 8F R01～R04 仍待本候选实测，RC8 结果不得继承。
+RC8 冻结记录：详见 `docs/releases/0.6.0-rc8.md`，本机 Phase 8F 验收证据已归档。RC9、RC10 的历史冻结记录分别见 `docs/releases/0.6.0-rc9.md` 与 `docs/releases/0.6.0-rc10.md`；二者均不能替代当前候选验收。RC11 冻结记录见 `docs/releases/0.6.0-rc11.md`；运行时代码提交为 `99628ea4650406163ba615f7ed18d9402cc7144f`，Build ID 为 `0.6.0-99628ea-20261017050753`，候选目录为 `C:\Project\LanDrop\dist\0.6.0-rc11-99628ea`。RC11 增加启动后鼠标激活修复和卸载完成页的防火墙允许应用引导；完整自动回归 212/212 通过，compileall、Ruff 0.17.1、strict Pyright 1.1.414、Setup / Uninstall / 主程序自检和 payload manifest / onedir ZIP 校验通过。RC11 Phase 8F R01～R04 尚待实机验收；配对文件前后哈希、卸载后检查以及 RC11 包内缺少的 A（0.5.9）升级基线均需补齐，旧候选结果不得继承。
 
 后续验证记录：`70311758e9af5247b90afc72c1c68ccc00bac12a` 只增强测试代码，不修改当时已冻结的 RC6 二进制；停滞连接 timeout/slot 释放及容量不足、ENOSPC、StorageError、客户端断开、session stop 后上传资源释放均有明确回归覆盖。文件名修复提交 `6feb6aa` 补充多扩展名设备名及 COM/LPT 上标数字测试；RC7 源码上的全量回归为 198/198。
 
@@ -867,7 +867,7 @@ Phase 8E 最终功能基线提交：`22d77ebe4e251aeeb6cd97a734ccb2978ac853e2`�
 
 ## 十、Phase 8F：干净 Windows 11 最终发布验收
 
-当前用于 P8-R01～R04 的唯一冻结候选为 RC9：见 `docs/releases/0.6.0-rc9.md`，验收清单为 `docs/plans/PHASE8F_RC9_ACCEPTANCE_CHECKLIST.md`。RC8 及更早候选均已被取代，不得使用。
+当前用于 P8-R01～R04 的唯一冻结候选为 RC11：见 [`RC11 冻结记录`](../releases/0.6.0-rc11.md)、[`RC11 验收清单`](PHASE8F_RC11_ACCEPTANCE_CHECKLIST.md) 和 [`RC11 交付说明`](../../RC11_PACKAGE_GUIDE.md)。RC10 及更早候选均已被取代，不得用于本轮验收。
 
 ### P8-R01：测试机要求
 

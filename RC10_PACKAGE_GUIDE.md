@@ -1,6 +1,6 @@
-# LanDrop 0.6.0 RC10 验收包说明
+# LanDrop 0.6.0 RC10 历史验收包说明
 
-此包包含冻结的 LanDrop `0.6.0-rc10` 候选及 Phase 8F 清单。RC10 的 Phase 8F 尚待 R01～R04 实机验收；RC9 与 RC8 的验收结果不能替代 RC10。
+此说明只记录历史冻结的 LanDrop `0.6.0-rc10` 候选。RC10 已于 2026-10-17 被 RC11 取代，不得用于当前 Phase 8F 验收；其哈希和验收结果也不能复制到 RC11。当前入口见 [`RC11_PACKAGE_GUIDE.md`](RC11_PACKAGE_GUIDE.md)。
 
 ## 使用哪个文件
 

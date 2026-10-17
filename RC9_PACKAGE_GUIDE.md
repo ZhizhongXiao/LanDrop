@@ -1,6 +1,6 @@
-# LanDrop 0.6.0 RC9 验收包说明
+# LanDrop 0.6.0 RC9 历史验收包说明
 
-此包是历史 RC9 候选，已由 RC10 取代，未进行 Phase 8F 验收。不要用此包完成当前验收；请使用 `RC10_PACKAGE_GUIDE.md`。
+此包是历史 RC9 候选，已由 RC10 和后续 RC11 取代，未进行 Phase 8F 验收。不要用此包完成当前验收；请使用 [`RC11_PACKAGE_GUIDE.md`](RC11_PACKAGE_GUIDE.md)。
 
 ## 使用哪个文件
 

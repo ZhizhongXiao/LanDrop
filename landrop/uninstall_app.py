@@ -230,11 +230,16 @@ class UninstallApi:
             return {"ok": False, "error": "防火墙允许应用入口仅在卸载完成后可用。"}
         with self._state_lock:
             operation = self._operation
-            outcome = operation.get("outcome") if operation is not None else None
-            can_open = (
+            outcome_value = operation.get("outcome") if operation is not None else None
+            outcome = (
+                cast(dict[str, object], outcome_value)
+                if isinstance(outcome_value, dict)
+                else None
+            )
+            can_open = bool(
                 operation is not None
                 and operation["phase"] == "finished"
-                and isinstance(outcome, dict)
+                and outcome is not None
                 and (outcome.get("complete") or outcome.get("finalization_pending"))
             )
         if not can_open:

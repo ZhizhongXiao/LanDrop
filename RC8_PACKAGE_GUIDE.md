@@ -1,6 +1,6 @@
 # LanDrop RC8 验收包说明
 
-本目录包含 LanDrop `0.6.0-rc8` 的冻结候选产物和实机验收材料。RC8 尚未通过最终发布验收，不是正式 release。
+本说明记录历史 LanDrop `0.6.0-rc8` 候选。RC8 后续已被 RC9～RC11 取代，不得用于当前验收；当前候选说明见 [`RC11_PACKAGE_GUIDE.md`](RC11_PACKAGE_GUIDE.md)。
 
 ## 使用哪个文件
 
