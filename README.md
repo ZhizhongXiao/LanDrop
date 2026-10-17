@@ -13,8 +13,9 @@ LanDrop 是一个面向 Windows 11 服务机与浏览器客户机的轻量局域
 - 第五阶段托盘、Windows 通知、旧通知隔离和统一退出已经实现，并通过 Windows 11 实机验收。
 - 第六阶段网络与防火墙诊断、冻结 endpoint 监测、PC↔PC Ethernet、分层性能基准和原始流上传已经通过人工与自动化验收。
 - 当前版本基线为 `0.6.0`；第七阶段开发验收和第八阶段 Phase 8A～8E 安装生命周期开发验收均已通过。自动化回归使用下方 unittest 命令运行，具体数量以 runner 输出为准。
+- LanDrop `0.6.0` 正式版交付构建已完成，Build ID 为 `0.6.0-0db49f6-20261017130621`；安装器和交付文件哈希见 [`正式版构建记录`](docs/releases/0.6.0.md)。
 - 本机真实环境已完成首次安装、双向传输、A→B 事务升级、保留数据卸载、重新安装和删除应用数据卸载；最终功能基线为提交 `22d77ebe4e251aeeb6cd97a734ccb2978ac853e2`。
-- 无源码、无 venv、无独立 Python、无旧安装历史的干净 Windows 11 Phase 8F 仍是最终发布门槛；在 WebView2、Private/Public、原生防火墙、自启动、升级、卸载和系统状态恢复全部通过前，不标记项目为发布验收完成。
+- 用户已指定 0.6.0 为最终正式版。干净 Windows 11 Phase 8F 实机记录中尚未采集的配对前后文件哈希与正式版卸载后状态仍未填写；本文和正式版记录不把这些项目记为通过。
 - 第八阶段正式分发采用单文件 `LanDrop-Setup.exe`；安装后的主程序保持 PyInstaller `--onedir`，独立 Setup/Uninstall 使用 `--onefile --windowed`。这样用户日常通过稳定快捷方式访问主程序，同时保留 onedir 已验证的启动与资源结构。
 - 公司等 `Public` 网络仍会拒绝启动。
 - 一次性 QR 客户机邀请已经实现并通过 Android 浏览器实扫验收；QR 主要面向手机，Windows 客户机优先直接输入访问地址。托盘由 `pystray` 提供，Windows 通知由 `Windows-Toasts` 提供。
